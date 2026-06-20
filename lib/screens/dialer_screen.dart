@@ -59,10 +59,8 @@ class _DialerScreenState extends State<DialerScreen> {
             // Dialed number display
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: SizedBox(
-                height: 60,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
+              child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
                       _dialedNumber.isEmpty ? ' ' : _dialedNumber,
@@ -101,7 +99,6 @@ class _DialerScreenState extends State<DialerScreen> {
                     ),
                   ],
                 ),
-              ),
             ),
 
             const SizedBox(height: 8),
