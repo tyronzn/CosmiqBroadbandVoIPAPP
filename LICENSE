@@ -1,0 +1,36 @@
+Copyright (c) 2026 Cosmiq Broadband. All rights reserved.
+
+This software and its source code (the "Software") are published in this
+repository for reference and transparency only.
+
+NO LICENSE IS GRANTED. No right or permission, express or implied, is granted to
+any person or entity to use, copy, modify, merge, publish, distribute,
+sublicense, create derivative works of, host, deploy, compile, run, or sell the
+Software or any portion of it, in whole or in part, for any purpose — whether
+commercial or non-commercial — without the prior written permission of the
+copyright holder.
+
+For the avoidance of doubt, and without limiting the above, you may NOT use the
+Software, or any derivative or portion of it, to provide, operate, host, or
+resell voice, telephony, VoIP, or any other communications service.
+
+Viewing the source code in this repository does not grant any rights to it. All
+rights not expressly granted are reserved by the copyright holder.
+
+To request a license, contact the copyright holder.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+
+This repository references, but does NOT include, the bcg729 G.729 codec by
+Belledonne Communications, which is licensed separately under the GNU General
+Public License v3 (GPLv3). bcg729 source is not redistributed here; it is fetched
+separately to enable optional G.729 support. See README.md and THIRD_PARTY.md.
+The terms above apply to the original code in this repository only.

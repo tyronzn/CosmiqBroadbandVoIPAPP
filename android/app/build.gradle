@@ -1,0 +1,68 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "za.co.cosmiq.voip"
+    compileSdk flutter.compileSdkVersion
+    // Pinned to the installed NDK (required now that we build the G.729 codec).
+    ndkVersion "28.2.13676358"
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    defaultConfig {
+        applicationId "za.co.cosmiq.voip"
+        minSdk 26
+        targetSdk flutter.targetSdkVersion
+        versionCode flutter.versionCode
+        versionName flutter.versionName
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=none"
+            }
+        }
+        ndk {
+            // bcg729 builds for these ABIs (covers the emulator + real devices).
+            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"
+        }
+    }
+
+    // Builds the bcg729 G.729 codec (libcosmiqg729.so) via CMake.
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    // Required for Linphone SDK
+    packagingOptions {
+        pickFirst "**/libc++_shared.so"
+        pickFirst "**/liblinphone-sdk.so"
+    }
+}
+
+flutter {
+    source "../.."
+}
+
+dependencies {
+    // No external SIP dependencies — SIP is implemented natively in Kotlin
+    // using UDP DatagramSocket (zero external dependencies)
+}
