@@ -261,8 +261,14 @@ class SipService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleHold() {
-    _isHeld = !_isHeld;
+  Future<void> toggleHold() async {
+    final target = !_isHeld;
+    try {
+      final res = await _methodChannel.invokeMethod('setHold', {'hold': target});
+      _isHeld = (res as bool?) ?? target;
+    } catch (e) {
+      _log.e('Hold error: $e');
+    }
     notifyListeners();
   }
 
@@ -272,10 +278,14 @@ class SipService extends ChangeNotifier {
         .catchError((_) {});
   }
 
-  void transferCall(String target) {
-    _methodChannel
-        .invokeMethod('transferCall', {'target': target})
-        .catchError((_) {});
+  Future<bool> transferCall(String target) async {
+    try {
+      final res = await _methodChannel.invokeMethod('transferCall', {'target': target});
+      return res == true;
+    } catch (e) {
+      _log.e('Transfer error: $e');
+      return false;
+    }
   }
 
   // ---------------------------------------------------------------------------

@@ -69,6 +69,16 @@ class CosmiqSipManager(private val context: Context) {
     private var g729: G729Codec? = null   // non-null only while a G.729 call is up
 
     private val muted = AtomicBoolean(false)
+    private val held = AtomicBoolean(false)
+
+    // Established-dialog routing, captured from the 200 OK (outbound) or INVITE
+    // (inbound) so in-dialog requests — re-INVITE (hold), REFER (transfer), BYE —
+    // reach the remote through PortaSIP's Record-Route proxies.
+    private var dlgRemoteTarget = ""                   // remote Contact = Request-URI
+    private var dlgRemoteUri = ""                      // remote AOR for the To header
+    private val dlgRouteSet = mutableListOf<String>()  // Route headers, in send order
+    private var dlgCseq = 1                            // CSeq for in-dialog requests
+
     private var remoteRtpHost = ""
     private var remoteRtpPort = 0
     private var isIncomingCall = false
@@ -214,8 +224,10 @@ class CosmiqSipManager(private val context: Context) {
         currentCallTag = newTag()
         currentToTag = ""
         currentRemoteTarget = target
+        dlgRemoteUri = "sip:$target@$domain"
         isIncomingCall = false
         callConfirmed = false
+        held.set(false)
         inviteCseq = 1
         sipResponses.clear()
 
@@ -265,6 +277,7 @@ class CosmiqSipManager(private val context: Context) {
                         code == 200 -> {
                             callConfirmed = true
                             currentToTag = extractTag(extractHeader(resp, "To") ?: "")
+                            captureDialog(resp, isUac = true)
                             parseRemoteSdp(resp)
                             Log.i(TAG, "Call connected to $target " +
                                 "(codec ${codecName(negotiatedPt)})")
@@ -323,22 +336,40 @@ class CosmiqSipManager(private val context: Context) {
                         }
                         // Keep the NAT pinhole open and keep the registrar happy.
                         msg.startsWith("OPTIONS ") -> sendSip(buildResponse(msg, 200, "OK"))
+                        // Transfer progress (sipfrag) — acknowledge so it stops retransmitting.
+                        msg.startsWith("NOTIFY ") -> sendSip(buildResponse(msg, 200, "OK"))
                         else -> { /* ACK, INFO, CANCEL, etc. — ignore */ }
                     }
-                } catch (_: Exception) { /* timeout, loop */ }
+                } catch (e: Exception) { Log.w(TAG, "receive loop: ${e.message}") }
             }
         }
     }
 
     private fun handleIncomingInvite(invite: String) {
+        val cid = extractHeader(invite, "Call-ID") ?: ""
+
+        // In-dialog re-INVITE on the current call (e.g. remote hold/resume) —
+        // answer it in place rather than treating it as a brand-new call.
+        if (callConfirmed && cid == currentCallId) {
+            val remoteDir = when {
+                invite.contains("a=sendonly") || invite.contains("a=inactive") -> "recvonly"
+                else -> "sendrecv"
+            }
+            sendSip(buildResponse(invite, 200, "OK", buildSdp(remoteDir)))
+            return
+        }
+
         incomingInvite = invite
         isIncomingCall = true
         callConfirmed = false
+        held.set(false)
         val fromHeader = extractHeader(invite, "From") ?: "Unknown"
         val caller = extractSipUser(fromHeader)
-        currentCallId = extractHeader(invite, "Call-ID") ?: newCallId()
+        currentCallId = cid.ifEmpty { newCallId() }
         currentCallTag = newTag()
+        currentToTag = extractTag(fromHeader)          // remote's tag
         currentRemoteTarget = caller
+        dlgRemoteUri = extractUriOnly(fromHeader)       // remote AOR
 
         // Send 180 Ringing
         sendSip(buildResponse(invite, 180, "Ringing"))
@@ -351,6 +382,7 @@ class CosmiqSipManager(private val context: Context) {
                 val sdp = buildSdp()
                 sendSip(buildResponse(incomingInvite, 200, "OK", sdp))
                 parseRemoteSdp(incomingInvite)
+                captureDialog(incomingInvite, isUac = false)
                 callConfirmed = true
                 val caller = extractSipUser(extractHeader(incomingInvite, "From") ?: "")
                 sendEvent(callSink, "CONNECTED:$caller")
@@ -386,6 +418,55 @@ class CosmiqSipManager(private val context: Context) {
                 result.success(true)
             } catch (e: Exception) {
                 result.error("HANGUP_ERROR", e.message, null)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Hold / Transfer (in-dialog requests)
+    // ---------------------------------------------------------------------------
+
+    /** Put the call on hold (re-INVITE a=sendonly) or resume it (a=sendrecv). */
+    fun setHold(hold: Boolean, result: MethodChannel.Result) {
+        thread {
+            try {
+                if (!callConfirmed) { result.success(held.get()); return@thread }
+                val sdp = buildSdp(if (hold) "sendonly" else "sendrecv")
+                val ok = sendDialogRequest("INVITE") { cseq, branch, auth ->
+                    buildInDialog("INVITE", cseq, branch, auth, sdp, "application/sdp")
+                }
+                if (ok != null) {
+                    // ACK the 2xx re-INVITE (same CSeq number, new branch).
+                    sendSip(buildInDialog("ACK", extractCSeqNum(ok), newBranch()))
+                    held.set(hold)
+                    Log.i(TAG, if (hold) "Call held" else "Call resumed")
+                }
+                result.success(held.get())
+            } catch (e: Exception) {
+                result.error("HOLD_ERROR", e.message, null)
+            }
+        }
+    }
+
+    /** Blind-transfer the call to [target] (REFER). The remote then BYEs us. */
+    fun transferCall(target: String, result: MethodChannel.Result) {
+        thread {
+            try {
+                if (!callConfirmed) { result.success(false); return@thread }
+                val referHeaders = "Refer-To: <sip:$target@$domain>\r\n" +
+                    "Referred-By: <sip:$username@$domain>\r\n"
+                val resp = sendDialogRequest("REFER") { cseq, branch, auth ->
+                    buildInDialog("REFER", cseq, branch, auth, extraHeaders = referHeaders)
+                }
+                val accepted = resp != null && parseStatus(resp) in 200..299
+                if (accepted) {
+                    Log.i(TAG, "Transfer to $target accepted (REFER ${parseStatus(resp!!)})")
+                    // Blind transfer: the remote leg re-targets and will BYE us;
+                    // the receive loop fires ENDED when that BYE arrives.
+                }
+                result.success(accepted)
+            } catch (e: Exception) {
+                result.error("TRANSFER_ERROR", e.message, null)
             }
         }
     }
@@ -492,8 +573,8 @@ class CosmiqSipManager(private val context: Context) {
                     micPeak = 0; micFrames = 0
                 }
 
-                // Muted: keep the RTP clock running but don't transmit voice.
-                if (muted.get()) { seq = (seq + 1) and 0xFFFF; ts += read; continue }
+                // Muted or on hold: keep the RTP clock running, send no voice.
+                if (muted.get() || held.get()) { seq = (seq + 1) and 0xFFFF; ts += read; continue }
 
                 val pt = negotiatedPt
                 // Build RTP header
@@ -753,17 +834,7 @@ class CosmiqSipManager(private val context: Context) {
             "Content-Length: 0\r\n\r\n"
     }
 
-    private fun buildBye(): String {
-        val toTag = if (currentToTag.isNotEmpty()) ";tag=$currentToTag" else ""
-        return "BYE sip:$currentRemoteTarget@$domain SIP/2.0\r\n" +
-            "Via: SIP/2.0/UDP $localIp:$SIP_PORT;branch=${newBranch()};rport\r\n" +
-            "Max-Forwards: 70\r\n" +
-            "From: <sip:$username@$domain>;tag=$currentCallTag\r\n" +
-            "To: <sip:$currentRemoteTarget@$domain>$toTag\r\n" +
-            "Call-ID: $currentCallId\r\n" +
-            "CSeq: ${inviteCseq + 1} BYE\r\n" +
-            "Content-Length: 0\r\n\r\n"
-    }
+    private fun buildBye(): String = buildInDialog("BYE", nextCseq(), newBranch())
 
     /**
      * CANCEL must match the INVITE it cancels: same Request-URI, Call-ID, From
@@ -784,28 +855,124 @@ class CosmiqSipManager(private val context: Context) {
     private fun buildResponse(
         request: String, code: Int, reason: String, sdp: String = ""
     ): String {
-        val via = extractHeader(request, "Via") ?: ""
+        val vias = extractAllHeaders(request, "Via")   // echo every Via, in order
         val from = extractHeader(request, "From") ?: ""
-        val to = extractHeader(request, "To") ?: ""
+        val toHdr = extractHeader(request, "To") ?: ""
+        // Add our tag only if the request's To doesn't already carry one
+        // (in-dialog requests like BYE/re-INVITE already include it).
+        val to = if (toHdr.contains("tag=", ignoreCase = true)) toHdr
+                 else "$toHdr;tag=$currentCallTag"
         val callIdH = extractHeader(request, "Call-ID") ?: ""
         val cseqH = extractHeader(request, "CSeq") ?: ""
         val sb = StringBuilder()
         sb.append("SIP/2.0 $code $reason\r\n")
-        sb.append("Via: $via\r\n")
+        for (v in vias) sb.append("Via: $v\r\n")
         sb.append("From: $from\r\n")
-        sb.append("To: $to;tag=$currentCallTag\r\n")
+        sb.append("To: $to\r\n")
         sb.append("Call-ID: $callIdH\r\n")
         sb.append("CSeq: $cseqH\r\n")
         if (sdp.isNotEmpty()) {
             sb.append("Contact: <sip:$username@$localIp:$SIP_PORT>\r\n")
             sb.append("Content-Type: application/sdp\r\n")
-            sb.append("Content-Length: ${sdp.length}\r\n\r\n")
+            sb.append("Content-Length: ${sdp.toByteArray().size}\r\n\r\n")
             sb.append(sdp)
         } else {
             sb.append("Content-Length: 0\r\n\r\n")
         }
         return sb.toString()
     }
+
+    /**
+     * Build an in-dialog request (re-INVITE, REFER, BYE, ACK) routed to the
+     * remote target through the dialog's Route set (captured from Record-Route).
+     */
+    private fun buildInDialog(
+        method: String, cseqN: Int, branch: String, auth: Auth? = null,
+        body: String = "", contentType: String = "", extraHeaders: String = ""
+    ): String {
+        val ruri = if (dlgRemoteTarget.isNotEmpty()) dlgRemoteTarget
+                   else "sip:$currentRemoteTarget@$domain"
+        val toUri = if (dlgRemoteUri.isNotEmpty()) dlgRemoteUri
+                    else "sip:$currentRemoteTarget@$domain"
+        val toTag = if (currentToTag.isNotEmpty()) ";tag=$currentToTag" else ""
+        val sb = StringBuilder()
+        sb.append("$method $ruri SIP/2.0\r\n")
+        sb.append("Via: SIP/2.0/UDP $localIp:$SIP_PORT;branch=$branch;rport\r\n")
+        for (r in dlgRouteSet) sb.append("Route: $r\r\n")
+        sb.append("Max-Forwards: 70\r\n")
+        sb.append("From: <sip:$username@$domain>;tag=$currentCallTag\r\n")
+        sb.append("To: <$toUri>$toTag\r\n")
+        sb.append("Call-ID: $currentCallId\r\n")
+        sb.append("CSeq: $cseqN $method\r\n")
+        sb.append("Contact: <sip:$username@$localIp:$SIP_PORT>\r\n")
+        sb.append("User-Agent: CosmiqVoIP/1.0\r\n")
+        if (auth != null) {
+            val h = if (auth.proxy) "Proxy-Authorization" else "Authorization"
+            sb.append("$h: Digest username=\"$username\",realm=\"${auth.realm}\",")
+            sb.append("nonce=\"${auth.nonce}\",uri=\"${auth.uri}\",")
+            sb.append("response=\"${auth.response}\",algorithm=MD5\r\n")
+        }
+        sb.append(extraHeaders)
+        if (body.isNotEmpty()) {
+            sb.append("Content-Type: $contentType\r\n")
+            sb.append("Content-Length: ${body.toByteArray().size}\r\n\r\n")
+            sb.append(body)
+        } else {
+            sb.append("Content-Length: 0\r\n\r\n")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Send an in-dialog request and wait for its final response, handling a
+     * 401/407 challenge by resending with credentials. Returns the 2xx response,
+     * or null on failure. [buildReq] receives (cseq, branch, auth?).
+     */
+    private fun sendDialogRequest(
+        method: String, buildReq: (Int, String, Auth?) -> String
+    ): String? {
+        sipResponses.clear()
+        var cseq = nextCseq()
+        var branch = newBranch()
+        sendSip(buildReq(cseq, branch, null))
+        var authed = false
+        val deadline = System.currentTimeMillis() + 8_000
+        while (System.currentTimeMillis() < deadline) {
+            val resp = sipResponses.poll(2, TimeUnit.SECONDS) ?: continue
+            if (extractCSeqMethod(resp) != method) continue
+            if (extractCSeqNum(resp) != cseq) continue
+            val code = parseStatus(resp)
+            when {
+                code in 100..199 -> { /* provisional, keep waiting */ }
+                (code == 401 || code == 407) && !authed -> {
+                    authed = true
+                    val ch = extractHeader(resp, "WWW-Authenticate")
+                        ?: extractHeader(resp, "Proxy-Authenticate") ?: return null
+                    val realm = extractParam(ch, "realm") ?: domain
+                    val nonce = extractParam(ch, "nonce") ?: ""
+                    val uri = dlgRemoteTarget.ifEmpty { "sip:$currentRemoteTarget@$domain" }
+                    val digest = DigestAuth(username, password, realm, nonce, uri, method)
+                    cseq = nextCseq(); branch = newBranch()
+                    sendSip(buildReq(cseq, branch, Auth(realm, nonce, digest, code == 407, uri)))
+                }
+                code in 200..299 -> return resp
+                else -> return null
+            }
+        }
+        return null
+    }
+
+    /** Capture in-dialog routing (remote Contact + Route set) for later requests. */
+    private fun captureDialog(msg: String, isUac: Boolean) {
+        dlgRemoteTarget = extractContactUri(msg) ?: "sip:$currentRemoteTarget@$domain"
+        val rr = extractAllHeaders(msg, "Record-Route")
+        dlgRouteSet.clear()
+        // A UAC reverses the Record-Route order; a UAS keeps it.
+        dlgRouteSet.addAll(if (isUac) rr.asReversed() else rr)
+        dlgCseq = if (isUac) inviteCseq else 1
+    }
+
+    private fun nextCseq(): Int { dlgCseq += 1; return dlgCseq }
 
     private fun buildInfo(tone: String): String {
         val body = "Signal=$tone\r\nDuration=160\r\n"
@@ -820,7 +987,7 @@ class CosmiqSipManager(private val context: Context) {
             "Content-Length: ${body.length}\r\n\r\n$body"
     }
 
-    private fun buildSdp(): String {
+    private fun buildSdp(direction: String = "sendrecv"): String {
         val g729 = G729Codec.available
         // List the preferred codec first so the remote end picks it; keep the
         // others as fallbacks for interop. G.729 (18) is only offered if its
@@ -845,7 +1012,7 @@ class CosmiqSipManager(private val context: Context) {
         }
         sb.append("a=rtpmap:101 telephone-event/8000\r\n")
         sb.append("a=fmtp:101 0-15\r\n")
-        sb.append("a=sendrecv\r\n")
+        sb.append("a=$direction\r\n")
         return sb.toString()
     }
 
@@ -868,13 +1035,22 @@ class CosmiqSipManager(private val context: Context) {
     private fun receiveSip(timeout: Int = 5000): String? {
         return try {
             sipSocket?.soTimeout = timeout
-            val buf = ByteArray(4096)
+            // SIP-over-UDP messages (a 200 OK with SDP + Record-Route) can exceed
+            // 4 KB; a too-small buffer silently truncates the datagram.
+            val buf = ByteArray(65536)
             val pkt = DatagramPacket(buf, buf.size)
             sipSocket?.receive(pkt)
+            // Strip any leading CRLF / whitespace / NUL framing some servers
+            // prepend (notably to large 200 OKs); otherwise startsWith("SIP/2.0")
+            // fails and the answer is silently dropped.
             val msg = String(pkt.data, 0, pkt.length, Charsets.UTF_8)
-            Log.d(TAG, "RECEIVED:\n${msg.take(200)}")
+                .dropWhile { it == '\r' || it == '\n' || it == ' ' || it == '\t' || it.code == 0 }
+            Log.d(TAG, "RECEIVED:\n${msg.take(120)}")
             msg
-        } catch (_: Exception) {
+        } catch (e: java.net.SocketTimeoutException) {
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "receiveSip error: ${e.message}")
             null
         }
     }
@@ -926,6 +1102,47 @@ class CosmiqSipManager(private val context: Context) {
     private fun extractCSeqNum(resp: String): Int {
         val cseq = extractHeader(resp, "CSeq") ?: return -1
         return cseq.trim().split(" ").getOrNull(0)?.toIntOrNull() ?: -1
+    }
+
+    /** All values of a (possibly repeated / comma-separated) header, in order. */
+    private fun extractAllHeaders(msg: String, name: String): List<String> {
+        val out = mutableListOf<String>()
+        for (line in msg.lines()) {
+            if (line.startsWith("$name:", ignoreCase = true)) {
+                for (part in splitOutsideAngles(line.substringAfter(":").trim())) {
+                    if (part.isNotBlank()) out.add(part.trim())
+                }
+            }
+        }
+        return out
+    }
+
+    /** Split on commas that are not inside <...> (for Record-Route / Via lists). */
+    private fun splitOutsideAngles(s: String): List<String> {
+        val out = mutableListOf<String>(); val cur = StringBuilder(); var depth = 0
+        for (c in s) {
+            when (c) {
+                '<' -> { depth++; cur.append(c) }
+                '>' -> { depth--; cur.append(c) }
+                ',' -> if (depth == 0) { out.add(cur.toString()); cur.clear() } else cur.append(c)
+                else -> cur.append(c)
+            }
+        }
+        if (cur.isNotEmpty()) out.add(cur.toString())
+        return out
+    }
+
+    /** The URI from a Contact header (inside <...>, or up to the first ';'). */
+    private fun extractContactUri(msg: String): String? {
+        val c = extractHeader(msg, "Contact") ?: return null
+        return Regex("<([^>]+)>").find(c)?.groupValues?.get(1)
+            ?: c.substringBefore(";").trim()
+    }
+
+    /** The bare URI from a From/To header value (inside <...>, no tag/params). */
+    private fun extractUriOnly(header: String): String {
+        return Regex("<([^>]+)>").find(header)?.groupValues?.get(1)
+            ?: header.substringBefore(";").trim()
     }
 
     private fun extractSipUser(sipUri: String): String {

@@ -41,6 +41,14 @@ class MainActivity : FlutterActivity() {
                 }
                 "answerCall" -> sipManager.answerCall(result)
                 "hangUp" -> sipManager.hangUp(result)
+                "setHold" -> {
+                    val hold = call.argument<Boolean>("hold") ?: false
+                    sipManager.setHold(hold, result)
+                }
+                "transferCall" -> {
+                    val target = call.argument<String>("target") ?: ""
+                    sipManager.transferCall(target, result)
+                }
                 "toggleMute" -> sipManager.toggleMute(result)
                 "toggleSpeaker" -> sipManager.toggleSpeaker(result)
                 "setPreferredCodec" -> {

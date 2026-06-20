@@ -73,15 +73,15 @@ class _SplashScreenState extends State<SplashScreen>
         opacity: _fadeAnimation,
         child: Center(
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Logo — replace with actual asset once added
+              // Cosmiq Broadband logo, centered on the splash screen.
               Image.asset(
                 'assets/images/cosmiq_logo_full.png',
                 width: 220,
                 errorBuilder: (_, __, ___) => const _FallbackLogo(),
               ),
-              const Spacer(),
             ],
           ),
         ),
