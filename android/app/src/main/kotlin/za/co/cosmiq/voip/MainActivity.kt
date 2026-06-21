@@ -31,7 +31,13 @@ class MainActivity : FlutterActivity() {
                     val username = call.argument<String>("username") ?: ""
                     val password = call.argument<String>("password") ?: ""
                     val domain = call.argument<String>("domain") ?: ""
-                    sipManager.register(username, password, domain, result)
+                    val pushProvider = call.argument<String>("pushProvider") ?: ""
+                    val pushParam = call.argument<String>("pushParam") ?: ""
+                    val pushToken = call.argument<String>("pushToken") ?: ""
+                    sipManager.register(
+                        username, password, domain,
+                        pushProvider, pushParam, pushToken, result
+                    )
                 }
                 "unregister" -> sipManager.unregister(result)
                 "makeCall" -> {

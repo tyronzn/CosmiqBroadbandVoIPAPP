@@ -6,6 +6,7 @@ import '../models/account_info.dart';
 import 'sip_service.dart';
 import 'portabilling_service.dart';
 import 'credential_service.dart';
+import 'push_service.dart';
 
 /// Central app state, exposed via Provider.
 /// Orchestrates SIP registration, PortaBilling API, call history, voicemail.
@@ -38,6 +39,27 @@ class AppState extends ChangeNotifier {
 
     // Register callback for call ended events
     sip.onCallEnded = _onCallEnded;
+
+    // React to the incoming-call push notification's Accept / Decline actions.
+    PushService.onAcceptCall = _onPushAccept;
+    PushService.onDeclineCall = _onPushDecline;
+  }
+
+  /// User accepted a push-notified incoming call: make sure SIP is registered so
+  /// the INVITE reaches us; the inbound-call flow then answers it.
+  Future<void> _onPushAccept(Map<String, dynamic> call) async {
+    _log.i('Push call accepted — waking SIP');
+    if (sip.registrationState != SipRegistrationState.registered) {
+      await tryAutoLogin();
+    }
+    // Answer if the INVITE is already ringing; otherwise the receive loop will
+    // surface it and the in-call screen handles answering.
+    if (sip.callState == SipCallState.ringing) await sip.answerCall();
+  }
+
+  void _onPushDecline(Map<String, dynamic> call) {
+    _log.i('Push call declined');
+    sip.rejectCall();
   }
 
   /// Try to auto-login with saved credentials.
@@ -68,8 +90,13 @@ class AppState extends ChangeNotifier {
     try {
       // Primary: register SIP. This proves the credentials and enables calling.
       await sip.initialize();
-      final registered =
-          await sip.register(extension: username, password: password);
+      final registered = await sip.register(
+        extension: username,
+        password: password,
+        pushProvider: PushService.available ? 'fcm' : null,
+        pushParam: PushService.senderId,
+        pushToken: PushService.fcmToken,
+      );
 
       if (!registered) {
         _loginError = 'Could not register. Check your extension and password.';

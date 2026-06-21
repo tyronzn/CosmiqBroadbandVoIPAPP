@@ -49,6 +49,12 @@ class CosmiqSipManager(private val context: Context) {
     private var domain = ""
     private var localIp = "0.0.0.0"
 
+    // RFC 8599 push parameters (FCM) advertised in the REGISTER Contact so
+    // PortaSIP can push incoming calls when the app is closed.
+    private var pnProvider = ""
+    private var pnParam = ""
+    private var pnPrm = ""
+
     // SIP state
     private var cseq = 1
     private var callId = newCallId()
@@ -134,9 +140,11 @@ class CosmiqSipManager(private val context: Context) {
 
     fun register(
         user: String, pass: String, dom: String,
+        pushProvider: String, pushParam: String, pushToken: String,
         result: MethodChannel.Result
     ) {
         username = user; password = pass; domain = dom
+        pnProvider = pushProvider; pnParam = pushParam; pnPrm = pushToken
         callId = newCallId(); tag = newTag(); cseq = 1
 
         thread {
@@ -772,7 +780,10 @@ class CosmiqSipManager(private val context: Context) {
         sb.append("To: <sip:$username@$domain>\r\n")
         sb.append("Call-ID: $callId\r\n")
         sb.append("CSeq: $cseq REGISTER\r\n")
-        sb.append("Contact: <sip:$username@$localIp:$SIP_PORT>\r\n")
+        // RFC 8599: advertise push params so PortaSIP can wake the app on a call.
+        val pnParams = if (pnProvider.isNotEmpty() && pnPrm.isNotEmpty())
+            ";pn-provider=$pnProvider;pn-param=$pnParam;pn-prm=$pnPrm" else ""
+        sb.append("Contact: <sip:$username@$localIp:$SIP_PORT$pnParams>\r\n")
         sb.append("Expires: 600\r\n")
         sb.append("User-Agent: CosmiqVoIP/1.0\r\n")
         if (auth != null && realm != null && nonce != null) {

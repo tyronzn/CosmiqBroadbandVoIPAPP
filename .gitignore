@@ -52,3 +52,7 @@ app.*.map.json
 # build real G.729 support (see README). Without it the app builds with a stub
 # and G.729 is simply not offered.
 /android/app/src/main/cpp/bcg729/
+
+# Firebase config (per-project keys). Provide your own to enable push — see
+# SETUP_PUSH.md. Without it the app builds with push disabled.
+/android/app/google-services.json

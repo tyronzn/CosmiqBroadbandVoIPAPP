@@ -3,9 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'theme/cosmiq_theme.dart';
 import 'services/app_state.dart';
+import 'services/push_service.dart';
 import 'screens/splash_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Lock to portrait on phones
@@ -21,6 +22,9 @@ void main() {
       statusBarIconBrightness: Brightness.dark,
     ),
   );
+
+  // Push notifications for incoming calls (no-op if Firebase isn't configured).
+  await PushService.init();
 
   runApp(const CosmiqVoipApp());
 }

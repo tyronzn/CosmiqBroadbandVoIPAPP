@@ -132,6 +132,9 @@ class SipService extends ChangeNotifier {
   Future<bool> register({
     required String extension,
     required String password,
+    String? pushProvider,
+    String? pushParam,
+    String? pushToken,
   }) async {
     _registrationState = SipRegistrationState.registering;
     _registeredExtension = extension;
@@ -145,6 +148,10 @@ class SipService extends ChangeNotifier {
         'username': extension,
         'password': password,
         'domain': ServerConfig.sipServer,
+        // RFC 8599 push params — tells PortaSIP where to push incoming calls.
+        'pushProvider': pushProvider ?? '',
+        'pushParam': pushParam ?? '',
+        'pushToken': pushToken ?? '',
       });
       _log.i('SIP register called for $extension');
     } catch (e) {
