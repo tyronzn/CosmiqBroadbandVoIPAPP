@@ -29,6 +29,14 @@ class ServerConfig {
   /// SIP realm / domain
   static const String sipRealm = 'voice.cosmiqbroadband.co.za';
 
+  /// SIP domain used in the SIP URI (sip:<ext>@<sipDomain>) for the WebRTC path.
+  static const String sipDomain = sipRealm;
+
+  /// SIP-over-WebSocket (WSS) gateway URL for the portable dart-sip-ua engine.
+  /// PLACEHOLDER — confirm the exact path with Backspace (a webrtc.* host exists).
+  /// Without PortaSIP's WebRTC gateway this engine cannot connect.
+  static const String wssUrl = 'wss://webrtc.cosmiqbroadband.co.za';
+
   /// Domain that the account self-care API login requires as a mandatory field.
   /// PortaBilling identifies the account by login + domain; for these accounts
   /// it is the SIP service domain.
