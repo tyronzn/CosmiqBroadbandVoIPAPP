@@ -7,6 +7,7 @@ import 'sip_service.dart';
 import 'portabilling_service.dart';
 import 'credential_service.dart';
 import 'push_service.dart';
+import 'call_history_store.dart';
 
 /// Central app state, exposed via Provider.
 /// Orchestrates SIP registration, PortaBilling API, call history, voicemail.
@@ -43,6 +44,17 @@ class AppState extends ChangeNotifier {
     // React to the incoming-call push notification's Accept / Decline actions.
     PushService.onAcceptCall = _onPushAccept;
     PushService.onDeclineCall = _onPushDecline;
+
+    // Restore Recents from disk so it's there immediately, even offline.
+    _loadPersistedHistory();
+  }
+
+  Future<void> _loadPersistedHistory() async {
+    final saved = await CallHistoryStore.load();
+    if (saved.isNotEmpty && _callHistory.isEmpty) {
+      _callHistory = saved;
+      notifyListeners();
+    }
   }
 
   /// User accepted a push-notified incoming call: make sure SIP is registered so
@@ -144,8 +156,16 @@ class AppState extends ChangeNotifier {
     _isLoggedIn = false;
     _callHistory = [];
     _voicemails = [];
+    await CallHistoryStore.clear();
     notifyListeners();
     _log.i('Logged out');
+  }
+
+  /// Clear Recents (in-memory + persisted), e.g. from a "Clear history" action.
+  Future<void> clearCallHistory() async {
+    _callHistory = [];
+    await CallHistoryStore.clear();
+    notifyListeners();
   }
 
   /// Refresh all data from PortaBilling.
@@ -156,10 +176,14 @@ class AppState extends ChangeNotifier {
     ]);
   }
 
-  /// Refresh call history from PortaBilling CDRs.
+  /// Refresh call history from PortaBilling CDRs, merged with locally-recorded
+  /// calls (so app-made calls aren't lost) and persisted to disk.
   Future<void> refreshCallHistory() async {
     try {
-      _callHistory = await billing.fetchCallHistory(limit: 50);
+      final cdrs = await billing.fetchCallHistory(limit: 50);
+      final localOnly = _callHistory.where((r) => r.isLocal).toList();
+      _callHistory = CallHistoryStore.merge(cdrs, localOnly);
+      await CallHistoryStore.save(_callHistory);
       notifyListeners();
     } catch (e) {
       _log.e('Failed to refresh call history: $e');
@@ -176,9 +200,10 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Called when a SIP call ends — add to local history.
+  /// Called when a SIP call ends — add to local history and persist.
   void _onCallEnded(CallRecord record) {
     _callHistory.insert(0, record);
+    CallHistoryStore.save(_callHistory);
     notifyListeners();
   }
 

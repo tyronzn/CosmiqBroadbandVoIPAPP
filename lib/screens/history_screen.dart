@@ -15,6 +15,28 @@ class HistoryScreen extends StatefulWidget {
 class _HistoryScreenState extends State<HistoryScreen> {
   bool _showMissedOnly = false;
 
+  Future<void> _confirmClear(BuildContext context, AppState appState) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Clear Recents'),
+        content: const Text('Remove all call history from this device?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Clear',
+                style: TextStyle(color: CosmiqColors.hangupRed)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await appState.clearCallHistory();
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<AppState>();
@@ -43,15 +65,31 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       color: CosmiqColors.textPrimary,
                     ),
                   ),
-                  GestureDetector(
-                    onTap: () => appState.refreshCallHistory(),
-                    child: const Text(
-                      'Refresh',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: CosmiqColors.tealDark,
+                  Row(
+                    children: [
+                      if (allRecords.isNotEmpty)
+                        GestureDetector(
+                          onTap: () => _confirmClear(context, appState),
+                          child: const Text(
+                            'Clear',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: CosmiqColors.hangupRed,
+                            ),
+                          ),
+                        ),
+                      const SizedBox(width: 16),
+                      GestureDetector(
+                        onTap: () => appState.refreshCallHistory(),
+                        child: const Text(
+                          'Refresh',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: CosmiqColors.tealDark,
+                          ),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
                 ],
               ),
