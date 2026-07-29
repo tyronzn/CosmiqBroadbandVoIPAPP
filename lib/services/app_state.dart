@@ -99,7 +99,11 @@ class AppState extends ChangeNotifier {
       );
 
       if (!registered) {
-        _loginError = 'Could not register. Check your extension and password.';
+        // Prefer the SIP layer's specific reason — "password rejected" and
+        // "gateway unreachable" need completely different fixes, and guessing
+        // sends the user down the wrong one.
+        _loginError = sip.lastError ??
+            'Could not register. Check your extension and password.';
         _isLoggedIn = false;
         _isLoading = false;
         notifyListeners();
