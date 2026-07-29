@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:sip_ua/sip_ua.dart';
 import '../models/server_config.dart';
 import '../models/call_record.dart';
+import 'callkit_service.dart';
 import 'connection_settings.dart';
 import 'diagnostics_log.dart';
 
@@ -37,6 +38,9 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
   bool _listenerAdded = false;
   String? _lastError;
 
+  /// Identifies the current call to the OS's call UI (iOS CallKit).
+  String? _callKitId;
+
   // WebRTC negotiates Opus/G.711 automatically; kept for UI compatibility.
   String get preferredCodec => 'Opus';
   bool get g729Available => false;
@@ -64,6 +68,20 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
       _helper.addSipUaHelperListener(this);
       _listenerAdded = true;
     }
+
+    // Native iOS call UI. No-op on Android, where PushService already presents
+    // incoming calls, so the two can't fight over the screen.
+    await CallKitService.init();
+    CallKitService.onAccept = answerCall;
+    CallKitService.onDecline = rejectCall;
+    CallKitService.onEnd = hangUp;
+    CallKitService.onMuteToggled = (muted) {
+      if (muted != _isMuted) toggleMute();
+    };
+    CallKitService.onHoldToggled = (onHold) {
+      if (onHold != _isHeld) toggleHold();
+    };
+    CallKitService.onDtmf = sendDtmf;
   }
 
   Future<bool> _ensureMicPermission() async {
@@ -202,6 +220,9 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
 
     DiagnosticsLog.info('CALL', 'Dialling $uri');
 
+    _callKitId = CallKitService.newCallId();
+    unawaited(CallKitService.reportOutgoing(id: _callKitId!, target: dest));
+
     final ok = await _helper.call(uri, voiceOnly: true);
     if (!ok) {
       _lastError = 'The call could not be started.';
@@ -339,6 +360,13 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
       case CallStateEnum.CALL_INITIATION:
         _remoteIdentity = call.remote_identity ?? _remoteIdentity;
         _callState = isIncoming ? SipCallState.ringing : SipCallState.calling;
+        if (isIncoming) {
+          _callKitId ??= CallKitService.newCallId();
+          unawaited(CallKitService.showIncoming(
+            id: _callKitId!,
+            caller: _remoteIdentity,
+          ));
+        }
         break;
       case CallStateEnum.PROGRESS:
       case CallStateEnum.CONNECTING:
@@ -348,6 +376,7 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
       case CallStateEnum.CONFIRMED:
         _callState = SipCallState.confirmed;
         _callStartTime ??= DateTime.now();
+        unawaited(CallKitService.setConnected(_callKitId));
         break;
       case CallStateEnum.STREAM:
         // Remote audio plays automatically on mobile; hold a ref to keep it alive.
@@ -452,6 +481,10 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     final duration = _callStartTime != null
         ? DateTime.now().difference(_callStartTime!)
         : Duration.zero;
+
+    // Hand the call back to the OS, or iOS keeps showing one that has ended.
+    unawaited(CallKitService.endCall(_callKitId));
+    _callKitId = null;
 
     if (_remoteIdentity.isNotEmpty && onCallEnded != null) {
       onCallEnded!(CallRecord.fromSipCall(

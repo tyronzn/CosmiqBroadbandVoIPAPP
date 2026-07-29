@@ -59,6 +59,7 @@ dependencies:
   # Uses SIP-over-WebSocket (WSS) + WebRTC media — needs PortaSIP's WebRTC gateway.
   sip_ua: ^1.0.0
   flutter_webrtc: ^0.12.5
+  flutter_callkit_incoming: ^3.1.3
 
 dev_dependencies:
   flutter_test:
