@@ -15,9 +15,10 @@ enum SipRegistrationState { unregistered, registering, registered, failed }
 /// Call state.
 enum SipCallState { none, calling, ringing, confirmed, held, ended }
 
-/// Portable SIP service backed by dart-sip-ua (SIP-over-WebSocket) + WebRTC
+/// Portable SIP service backed by dart-sip-ua (SIP over TCP) + WebRTC
 /// media — runs identically on Android and iOS. Replaces the Android-only
-/// native UDP stack. Requires PortaSIP's WebRTC/WSS gateway (see ServerConfig).
+/// native UDP stack. Registers over plain SIP/TCP to the voice platform, so
+/// it needs no WebRTC gateway (see ConnectionSettings).
 class SipService extends ChangeNotifier implements SipUaHelperListener {
   static final _log = Logger(printer: PrettyPrinter(methodCount: 0));
 
@@ -72,7 +73,7 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     return status.isGranted;
   }
 
-  /// Register over WSS. [pushProvider]/[pushParam]/[pushToken] are accepted for
+  /// Register over SIP/TCP. [pushProvider]/[pushParam]/[pushToken] are accepted for
   /// API compatibility (push is handled separately per platform).
   Future<bool> register({
     required String extension,
@@ -87,9 +88,10 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     // Fail immediately on an unusable endpoint instead of burning the 20s
     // timeout on a connection that can never open.
     final endpointProblem =
-        ConnectionSettings.validateWssUrl(ConnectionSettings.wssUrl);
+        ConnectionSettings.validateSipHost(ConnectionSettings.sipHost) ??
+            ConnectionSettings.validateSipPort(ConnectionSettings.sipPort);
     if (endpointProblem != null) {
-      _lastError = 'WebRTC endpoint is not configured. $endpointProblem';
+      _lastError = 'SIP server is not configured. $endpointProblem';
       DiagnosticsLog.error('SIP', _lastError!);
       _registrationState = SipRegistrationState.failed;
       notifyListeners();
@@ -108,22 +110,22 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     DiagnosticsLog.info(
       'SIP',
       'Registering $extension@${ConnectionSettings.sipDomain} '
-          'via ${ConnectionSettings.wssUrl}',
+          'via ${ConnectionSettings.sipHost}:${ConnectionSettings.sipPort} (TCP)',
     );
 
     final completer = Completer<bool>();
     _registerCompleter = completer;
 
     final settings = UaSettings()
-      ..webSocketUrl = ConnectionSettings.wssUrl
-      ..webSocketSettings.allowBadCertificate = false
+      ..host = ConnectionSettings.sipHost
+      ..port = ConnectionSettings.sipPort
       ..uri = 'sip:$extension@${ConnectionSettings.sipDomain}'
       ..authorizationUser = extension
       ..password = password
       ..displayName = extension
       ..userAgent = 'Cosmiq VoIP'
       ..dtmfMode = DtmfMode.RFC2833
-      ..transportType = TransportType.WS
+      ..transportType = TransportType.TCP
       ..register = true
       ..iceServers = [
         {'urls': ServerConfig.stunServer},
@@ -132,7 +134,7 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     try {
       await _helper.start(settings);
     } catch (e) {
-      _lastError = 'Could not open a connection to the WebRTC gateway ($e).';
+      _lastError = 'Could not open a connection to the SIP server ($e).';
       DiagnosticsLog.error('SIP', 'helper.start() threw: $e');
       _registrationState = SipRegistrationState.failed;
       notifyListeners();
@@ -144,9 +146,8 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
       onTimeout: () {
         if (_registrationState != SipRegistrationState.registered) {
           _lastError ??=
-              'The gateway did not respond within 20 seconds. Check the WSS URL '
-              'in Settings → Connection, and that the WebRTC gateway is enabled '
-              'for this account.';
+              'The SIP server did not respond within 20 seconds. Check your '
+              'network, and the server in Settings → Connection.';
           DiagnosticsLog.error('SIP', 'Registration timed out after 20s');
           _registrationState = SipRegistrationState.failed;
           notifyListeners();
@@ -159,7 +160,7 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
   Future<void> unregister() async {
     try {
       _helper.unregister();
-      // Also drop the WebSocket. Without this the transport stays open and a
+      // Also drop the socket. Without this the transport stays open and a
       // later register() can reuse a half-dead connection.
       _helper.stop();
     } catch (_) {}
@@ -301,22 +302,22 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
   void transportStateChanged(TransportState state) {
     switch (state.state) {
       case TransportStateEnum.CONNECTING:
-        DiagnosticsLog.info('WS', 'Connecting to ${ConnectionSettings.wssUrl}');
+        DiagnosticsLog.info('TCP',
+            'Connecting to ${ConnectionSettings.sipHost}:${ConnectionSettings.sipPort}');
         break;
       case TransportStateEnum.CONNECTED:
-        DiagnosticsLog.info('WS', 'WebSocket connected');
+        DiagnosticsLog.info('TCP', 'Connected to the SIP server');
         break;
       case TransportStateEnum.DISCONNECTED:
         final cause = _causeText(state.cause);
         DiagnosticsLog.error(
-            'WS', 'WebSocket disconnected${cause != null ? " — $cause" : ""}');
+            'TCP', 'Disconnected${cause != null ? " — $cause" : ""}');
         // A transport drop mid-registration would otherwise leave the login
         // spinner running until the 20s timeout with nothing to explain it.
         if (_registrationState == SipRegistrationState.registering ||
             _registrationState == SipRegistrationState.registered) {
-          _lastError = 'Lost the connection to the WebRTC gateway'
-              '${cause != null ? " ($cause)" : ""}. Check the WSS URL in '
-              'Settings → Connection, and your network.';
+          _lastError = 'Lost the connection to the SIP server'
+              '${cause != null ? " ($cause)" : ""}. Check your network.';
           _registrationState = SipRegistrationState.failed;
         }
         _completeRegister(false);
@@ -445,7 +446,7 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     }
     final detail = _causeText(cause);
     return 'Registration failed${detail != null ? " ($detail)" : ""}. Check the '
-        'WSS URL in Settings → Connection.';
+        'SIP server in Settings → Connection.';
   }
 
   void _endCall(CallStatus status) {

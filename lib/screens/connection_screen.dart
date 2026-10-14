@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 import '../services/connection_settings.dart';
 import '../theme/cosmiq_theme.dart';
 
-/// Lets the WebRTC gateway endpoint be corrected on the device.
+/// Diagnostic override for the SIP server the app registers to.
 ///
-/// The carrier supplies the exact WSS host, port and path; if it doesn't match
-/// the shipped default, registration fails. Editing it here avoids a rebuild —
-/// which on iOS would otherwise mean going back to a Mac for every attempt.
+/// Users never need this: signing in with an extension and password connects to
+/// Cosmiq's own SIP service out of the box. It exists so support can correct a
+/// changed or mistyped server on the handset instead of shipping a new build —
+/// which on iOS would otherwise mean going back to a Mac.
 class ConnectionScreen extends StatefulWidget {
   const ConnectionScreen({super.key});
 
@@ -15,40 +16,49 @@ class ConnectionScreen extends StatefulWidget {
 }
 
 class _ConnectionScreenState extends State<ConnectionScreen> {
-  late final TextEditingController _wssController;
+  late final TextEditingController _hostController;
+  late final TextEditingController _portController;
   late final TextEditingController _domainController;
-  String? _wssError;
+  String? _hostError;
+  String? _portError;
   String? _domainError;
   bool _saved = false;
 
   @override
   void initState() {
     super.initState();
-    _wssController = TextEditingController(text: ConnectionSettings.wssUrl);
+    _hostController = TextEditingController(text: ConnectionSettings.sipHost);
+    _portController = TextEditingController(text: ConnectionSettings.sipPort);
     _domainController =
         TextEditingController(text: ConnectionSettings.sipDomain);
   }
 
   @override
   void dispose() {
-    _wssController.dispose();
+    _hostController.dispose();
+    _portController.dispose();
     _domainController.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
-    final wss = _wssController.text.trim();
+    final host = _hostController.text.trim();
+    final port = _portController.text.trim();
     final domain = _domainController.text.trim();
-    final wssError = ConnectionSettings.validateWssUrl(wss);
+
+    final hostError = ConnectionSettings.validateSipHost(host);
+    final portError = ConnectionSettings.validateSipPort(port);
     final domainError = ConnectionSettings.validateSipDomain(domain);
 
     setState(() {
-      _wssError = wssError;
+      _hostError = hostError;
+      _portError = portError;
       _domainError = domainError;
     });
-    if (wssError != null || domainError != null) return;
+    if (hostError != null || portError != null || domainError != null) return;
 
-    await ConnectionSettings.setWssUrl(wss);
+    await ConnectionSettings.setSipHost(host);
+    await ConnectionSettings.setSipPort(port);
     await ConnectionSettings.setSipDomain(domain);
     if (!mounted) return;
     setState(() => _saved = true);
@@ -64,12 +74,52 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     await ConnectionSettings.resetToDefaults();
     if (!mounted) return;
     setState(() {
-      _wssController.text = ConnectionSettings.wssUrl;
+      _hostController.text = ConnectionSettings.sipHost;
+      _portController.text = ConnectionSettings.sipPort;
       _domainController.text = ConnectionSettings.sipDomain;
-      _wssError = null;
+      _hostError = null;
+      _portError = null;
       _domainError = null;
       _saved = true;
     });
+  }
+
+  Widget _field({
+    required String label,
+    required TextEditingController controller,
+    required String hint,
+    required String help,
+    String? error,
+    TextInputType keyboard = TextInputType.url,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        TextField(
+          controller: controller,
+          autocorrect: false,
+          enableSuggestions: false,
+          keyboardType: keyboard,
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: Colors.white,
+            hintText: hint,
+            errorText: error,
+            border:
+                OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(help,
+            style: const TextStyle(
+                fontSize: 12, color: CosmiqColors.textSecondary)),
+        const SizedBox(height: 20),
+      ],
+    );
   }
 
   @override
@@ -85,7 +135,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          if (ConnectionSettings.isUsingUnconfirmedDefault) ...[
+          if (ConnectionSettings.isOverridden) ...[
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -94,78 +144,41 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 border: Border.all(color: const Color(0xFFFFD8A8)),
               ),
               child: const Text(
-                'This is still the default gateway address, which has not been '
-                'confirmed with your provider. Until the real address is '
-                'entered here, sign-in is expected to fail.',
+                'These settings have been changed from the defaults. If calling '
+                'has stopped working, use Reset to defaults below.',
                 style: TextStyle(fontSize: 13, height: 1.35),
               ),
             ),
             const SizedBox(height: 16),
           ],
 
-          const Text(
-            'WebRTC gateway (WSS)',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          _field(
+            label: 'SIP server',
+            controller: _hostController,
+            hint: 'voice.cosmiqbroadband.co.za',
+            help: 'The server the app registers to. Leave this alone unless '
+                'support has asked you to change it.',
+            error: _hostError,
           ),
-          const SizedBox(height: 6),
-          TextField(
-            controller: _wssController,
-            autocorrect: false,
-            enableSuggestions: false,
-            keyboardType: TextInputType.url,
-            style: const TextStyle(fontSize: 14),
-            decoration: InputDecoration(
-              filled: true,
-              fillColor: Colors.white,
-              hintText: 'wss://host:port/path',
-              errorText: _wssError,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
+          _field(
+            label: 'Port',
+            controller: _portController,
+            hint: '5060',
+            help: 'Standard SIP port is 5060.',
+            error: _portError,
+            keyboard: TextInputType.number,
           ),
-          const SizedBox(height: 4),
-          const Text(
-            'Supplied by your provider. Include the port and path if they gave '
-            'you one, e.g. wss://webrtc.example.co.za:8443/ws',
-            style: TextStyle(fontSize: 12, color: CosmiqColors.textSecondary),
-          ),
-          const SizedBox(height: 20),
-
-          const Text(
-            'SIP domain',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 6),
-          TextField(
+          _field(
+            label: 'SIP domain',
             controller: _domainController,
-            autocorrect: false,
-            enableSuggestions: false,
-            keyboardType: TextInputType.url,
-            style: const TextStyle(fontSize: 14),
-            decoration: InputDecoration(
-              filled: true,
-              fillColor: Colors.white,
-              hintText: 'voice.example.co.za',
-              errorText: _domainError,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
+            hint: 'voice.cosmiqbroadband.co.za',
+            help: 'Used in your SIP address, as extension@domain.',
+            error: _domainError,
           ),
-          const SizedBox(height: 4),
-          const Text(
-            'The domain in your SIP address, used as sip:<extension>@<domain>.',
-            style: TextStyle(fontSize: 12, color: CosmiqColors.textSecondary),
-          ),
-          const SizedBox(height: 24),
 
           SizedBox(
             width: double.infinity,
-            child: ElevatedButton(
-              onPressed: _save,
-              child: const Text('Save'),
-            ),
+            child: ElevatedButton(onPressed: _save, child: const Text('Save')),
           ),
           const SizedBox(height: 8),
           SizedBox(
@@ -181,7 +194,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             const Text(
               'Changes take effect on the next sign-in.',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: CosmiqColors.textSecondary),
+              style:
+                  TextStyle(fontSize: 12, color: CosmiqColors.textSecondary),
             ),
           ],
         ],

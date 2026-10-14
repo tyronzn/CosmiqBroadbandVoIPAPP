@@ -1,54 +1,78 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cosmiq_voip/services/connection_settings.dart';
 
-/// The endpoint validators are the guard rail for the one setting a user is
-/// most likely to type by hand — the WebRTC gateway URL supplied by the
-/// carrier. A bad value here looks identical to a broken account, so these
-/// cases are worth pinning down.
+/// These validators guard the one screen a support engineer can change in the
+/// field. A bad value here looks exactly like a broken account, so the cases
+/// are worth pinning down.
 void main() {
-  group('validateWssUrl', () {
-    test('accepts a plain wss host', () {
-      expect(
-        ConnectionSettings.validateWssUrl('wss://webrtc.example.co.za'),
-        isNull,
-      );
+  group('defaults', () {
+    test('ships pointing at Cosmiq\u0027s own SIP service', () {
+      // Users only ever type an extension and a password. If this default ever
+      // drifts, every new install would fail to register.
+      expect(ConnectionSettings.defaultSipHost, 'voice.cosmiqbroadband.co.za');
+      expect(ConnectionSettings.defaultSipPort, '5060');
+      expect(ConnectionSettings.defaultSipDomain, 'voice.cosmiqbroadband.co.za');
     });
 
-    test('accepts a wss host with port and path', () {
+    test('effective values fall back to those defaults', () {
+      expect(ConnectionSettings.sipHost, ConnectionSettings.defaultSipHost);
+      expect(ConnectionSettings.sipPort, ConnectionSettings.defaultSipPort);
+      expect(ConnectionSettings.sipDomain, ConnectionSettings.defaultSipDomain);
+      expect(ConnectionSettings.isOverridden, isFalse);
+    });
+  });
+
+  group('validateSipHost', () {
+    test('accepts a normal host name', () {
       expect(
-        ConnectionSettings.validateWssUrl('wss://webrtc.example.co.za:8443/ws'),
+        ConnectionSettings.validateSipHost('voice.cosmiqbroadband.co.za'),
         isNull,
       );
-    });
-
-    test('accepts ws:// for local testing', () {
-      expect(ConnectionSettings.validateWssUrl('ws://localhost:8080'), isNull);
     });
 
     test('trims surrounding whitespace before judging', () {
-      expect(
-        ConnectionSettings.validateWssUrl('  wss://webrtc.example.co.za  '),
-        isNull,
-      );
+      expect(ConnectionSettings.validateSipHost('  voice.example.co.za  '),
+          isNull);
     });
 
     test('rejects an empty value', () {
-      expect(ConnectionSettings.validateWssUrl(''), isNotNull);
-      expect(ConnectionSettings.validateWssUrl('   '), isNotNull);
+      expect(ConnectionSettings.validateSipHost(''), isNotNull);
+      expect(ConnectionSettings.validateSipHost('   '), isNotNull);
     });
 
-    test('rejects a non-websocket scheme', () {
-      final error = ConnectionSettings.validateWssUrl('https://example.co.za');
+    test('rejects a host with the port stuck on it', () {
+      // A very easy mistake, and it would otherwise fail obscurely.
+      final error = ConnectionSettings.validateSipHost('voice.example.co.za:5060');
       expect(error, isNotNull);
-      expect(error, contains('wss://'));
+      expect(error, contains('port'));
     });
 
-    test('rejects text that is not a URL', () {
-      expect(ConnectionSettings.validateWssUrl('not a url'), isNotNull);
+    test('rejects a URL rather than a host name', () {
+      expect(ConnectionSettings.validateSipHost('sip://voice.example.co.za'),
+          isNotNull);
     });
 
-    test('rejects a URL with no host', () {
-      expect(ConnectionSettings.validateWssUrl('wss://'), isNotNull);
+    test('rejects a value with no dot', () {
+      expect(ConnectionSettings.validateSipHost('localhost'), isNotNull);
+    });
+  });
+
+  group('validateSipPort', () {
+    test('accepts the standard SIP port', () {
+      expect(ConnectionSettings.validateSipPort('5060'), isNull);
+    });
+
+    test('rejects an empty value', () {
+      expect(ConnectionSettings.validateSipPort(''), isNotNull);
+    });
+
+    test('rejects a non-numeric port', () {
+      expect(ConnectionSettings.validateSipPort('abc'), isNotNull);
+    });
+
+    test('rejects a port outside the valid range', () {
+      expect(ConnectionSettings.validateSipPort('0'), isNotNull);
+      expect(ConnectionSettings.validateSipPort('70000'), isNotNull);
     });
   });
 
@@ -60,30 +84,10 @@ void main() {
       );
     });
 
-    test('rejects an empty value', () {
+    test('rejects empty, path-bearing and dotless values', () {
       expect(ConnectionSettings.validateSipDomain(''), isNotNull);
-    });
-
-    test('rejects a value with no dot', () {
-      expect(ConnectionSettings.validateSipDomain('localhost'), isNotNull);
-    });
-
-    test('rejects a value containing a path', () {
       expect(ConnectionSettings.validateSipDomain('example.co.za/ws'), isNotNull);
-    });
-
-    test('rejects a value containing a space', () {
-      expect(ConnectionSettings.validateSipDomain('example .co.za'), isNotNull);
-    });
-  });
-
-  group('defaults', () {
-    test('effective values fall back to the compiled-in defaults', () {
-      // No overrides are loaded in a bare test process.
-      expect(ConnectionSettings.wssUrl, ConnectionSettings.defaultWssUrl);
-      expect(ConnectionSettings.sipDomain, ConnectionSettings.defaultSipDomain);
-      expect(ConnectionSettings.isOverridden, isFalse);
-      expect(ConnectionSettings.isUsingUnconfirmedDefault, isTrue);
+      expect(ConnectionSettings.validateSipDomain('localhost'), isNotNull);
     });
   });
 }

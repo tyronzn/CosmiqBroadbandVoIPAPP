@@ -69,8 +69,8 @@ class DiagnosticsLog {
     final buffer = StringBuffer()
       ..writeln('Cosmiq VoIP diagnostics')
       ..writeln('App version : ${ServerConfig.appVersion}')
-      ..writeln('Engine      : dart-sip-ua + WebRTC (SIP over WebSocket)')
-      ..writeln('WSS URL     : ${ConnectionSettings.wssUrl}'
+      ..writeln('Engine      : dart-sip-ua + WebRTC (SIP over TCP)')
+      ..writeln('SIP server  : ${ConnectionSettings.sipHost}:${ConnectionSettings.sipPort}'
           '${ConnectionSettings.isOverridden ? "  (overridden)" : ""}')
       ..writeln('SIP domain  : ${ConnectionSettings.sipDomain}')
       ..writeln('Generated   : ${DateTime.now().toIso8601String()}')

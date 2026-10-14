@@ -1,42 +1,50 @@
-# iOS support (portable SIP/WebRTC engine)
+# iOS support (portable SIP engine)
 
 This branch (`ios-webrtc`) replaces the Android-only native UDP SIP stack with a
-**portable Dart engine** — `dart-sip-ua` (SIP-over-WebSocket) + `flutter_webrtc`
-(media) — so **Android and iOS run the same call code**.
+**portable Dart engine** — `dart-sip-ua` for signalling plus `flutter_webrtc`
+for media — so **Android and iOS run the same call code**.
 
-## The gating dependency: PortaSIP WebRTC gateway
+## Transport: plain SIP over TCP, not WebRTC
 
-This engine connects over **WSS** (SIP-over-WebSocket) with **WebRTC media**, not
-plain UDP SIP. It only works if Backspace/PortaSIP exposes a **WebRTC gateway**.
+An earlier version of this branch registered over **WSS** (SIP-over-WebSocket)
+and needed PortaSIP's WebRTC gateway. **That gateway does not exist on this
+platform**, which was established directly rather than taken on trust:
 
-Ask Backspace for three things before testing:
+- `webrtc.cosmiqbroadband.co.za` only resolved because of a **wildcard** DNS
+  record (`*.cosmiqbroadband.co.za`) pointing at Cloudflare. There is no
+  `webrtc` record and no gateway behind it — a WebSocket upgrade on `/`, `/ws`
+  and `/sip` returns a Cloudflare **404**.
+- The SIP host `voice.cosmiqbroadband.co.za` has **no TLS ports open at all**
+  (443, 8443 and 5061 are closed).
 
-1. Is the **PortaSIP WebRTC/WSS gateway enabled** for this account?
-2. The **exact WSS URL** — host **plus port and path** (e.g. `wss://webrtc.cosmiqbroadband.co.za:8443/ws`).
-3. The **SIP domain** to use over WebRTC (expected: `voice.cosmiqbroadband.co.za`).
+What the platform does answer, verified with a live SIP OPTIONS probe:
 
-Until the real endpoint is set, registration fails — there is nothing to connect
-to. The app says so rather than looking broken: while it is still on the shipped
-default, **Settings → Connection** shows a warning banner.
-
-### Setting the endpoint
-
-**On the device (preferred while testing):** Settings → Connection. Enter the WSS
-URL and SIP domain, save, then sign out and back in. No rebuild — which matters
-on iOS, where a rebuild means going back to the Mac. The override is stored on
-the device and survives restarts; "Reset to defaults" clears it.
-
-**In code (once the value is confirmed):** update the shipped defaults in
-`lib/models/server_config.dart` so new installs get it without any setup:
-```dart
-static const String wssUrl = 'wss://webrtc.cosmiqbroadband.co.za';  // ← confirm path
-static const String sipDomain = 'voice.cosmiqbroadband.co.za';      // ← confirm
+```
+SIP/2.0 200 OK
+Server: PortaSIP
+Allow: INVITE, ACK, BYE, CANCEL, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS
 ```
 
-The gateway needs a **valid TLS certificate** — the client sets
-`allowBadCertificate = false`, so a self-signed cert fails the handshake.
+...over **both UDP and TCP on 5060**. So the engine now uses
+`TransportType.TCP` straight to `voice.cosmiqbroadband.co.za:5060`. WebRTC was
+only ever a client-side convenience, never a platform requirement, and dropping
+it removes every external dependency: no gateway, no new infrastructure, and
+nothing needed from the carrier.
 
-## Build & run on your Mac
+`sip_ua` is **MIT licensed**, so this changes nothing about the app's own
+proprietary licence.
+
+## Sign-in is unchanged
+
+Users enter **only an extension and a password**, and always authenticate
+against `voice.cosmiqbroadband.co.za`. The server is a compiled-in default in
+`lib/models/server_config.dart`.
+
+**Settings → Connection** can override the server, port and SIP domain, but it
+is a support/diagnostic tool, not part of the sign-in flow. A banner appears
+whenever the values differ from the defaults, with a Reset.
+
+## Build and run on your Mac
 
 ```bash
 git checkout ios-webrtc
@@ -46,48 +54,50 @@ flutter run -d <your-iphone>
 ```
 
 In **Xcode** (`ios/Runner.xcworkspace`), set:
-1. **Bundle Identifier** → `za.co.cosmiq.voip` (Runner target → Signing & Capabilities).
-   *(The generator made `za.co.cosmiq.cosmiqVoip` — change it.)*
-2. **Team** → your Apple Developer team (for signing).
-3. **iOS Deployment Target → 13.0** (required by `flutter_webrtc`). Also set
-   `platform :ios, '13.0'` at the top of `ios/Podfile` (uncomment/edit), then
-   re-run `pod install`.
 
-Microphone permission + VoIP background modes are already in `ios/Runner/Info.plist`.
+1. **Bundle Identifier** to `za.co.cosmiq.voip` (Runner target, Signing &
+   Capabilities). The generator produced `za.co.cosmiq.cosmiqVoip`.
+2. **Team** to your Apple Developer team, for signing.
+3. **iOS Deployment Target to 13.0**, required by `flutter_webrtc`. Also set
+   `platform :ios, '13.0'` at the top of `ios/Podfile`, then re-run
+   `pod install`.
 
-## What changed (and what didn't)
+Microphone permission and the VoIP background modes are already in
+`ios/Runner/Info.plist`.
+
+## Validate on Android first
+
+The engine is shared, so the whole approach can be proven on an Android handset
+or emulator on Windows, before a Mac is involved:
+
+```bash
+flutter build apk --debug
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
+adb logcat -s flutter
+```
+
+If registration succeeds there, the remaining iOS work is a build and signing
+exercise rather than an engineering unknown.
+
+## What changed, and what did not
 
 | Area | Status |
 |------|--------|
-| UI, AppState, dialer/in-call/settings | unchanged — same `SipService` interface |
-| Call engine | now `dart-sip-ua` + `flutter_webrtc` (`lib/services/sip_service.dart`) |
-| Android native UDP stack (`CosmiqSipManager.kt`) | unused on this branch (kept, harmless) |
-| Codec selection | WebRTC negotiates **Opus** automatically. The picker is gone — Settings now shows "Opus (automatic)". **G.729 is dropped** — WebRTC doesn't support it. |
-| Push (incoming calls) | Android FCM still wired; **iOS needs APNs + PushKit + CallKit** (not yet built — Apple requires CallKit for VoIP push) |
+| UI, AppState, dialer, in-call, settings | unchanged — same `SipService` interface |
+| Signalling | `dart-sip-ua` over **TCP/5060** (`lib/services/sip_service.dart`) |
+| Media | `flutter_webrtc` |
+| Android native UDP stack (`CosmiqSipManager.kt`) | unused on this branch, kept and harmless |
+| Codec selection | WebRTC negotiates automatically; Settings shows "Opus (automatic)". **G.729 is not available** on this engine |
+| Push (incoming calls) | Android FCM is wired. **iOS needs CallKit and PushKit** — see the `ios-callkit` branch and SETUP_CALLKIT.md |
 
-## When something fails on the handset
+## The known risk: media
 
-There is no console attached to a phone in the field, and reading the iOS device
-log needs a Mac — so the app keeps its own log.
+Signalling over TCP is settled. **Media is the open question.** `flutter_webrtc`
+negotiates DTLS-SRTP with ICE, while a plain SIP platform may expect
+unencrypted RTP over AVP. If registration and call setup succeed but there is no
+audio, that mismatch is the first thing to suspect, and the fix is on the
+platform side (enabling SRTP/ICE) or by swapping the media layer.
 
-**Settings → Diagnostics** shows every registration, WebSocket and call
-transition, newest first, and the copy button puts the whole log (with the app
-version and the endpoint in use) on the clipboard — paste that into a message to
-support or to Backspace. Credentials are never logged.
-
-Sign-in failures are reported with their cause rather than a generic error:
-
-| What you see | What it means |
-|---|---|
-| Extension or password rejected | SIP 401/403 — credentials are wrong |
-| That extension does not exist | SIP 404 — wrong extension, or not provisioned |
-| Lost the connection to the WebRTC gateway | WebSocket dropped — wrong URL, TLS, or firewall |
-| The gateway did not respond within 20 seconds | Nothing listening at that URL |
-| WebRTC endpoint is not configured | The URL in Settings → Connection is malformed |
-
-## Remaining iOS work (after calls work)
-
-- **CallKit + PushKit + APNs** for incoming calls when the app is closed (the iOS
-  equivalent of the Android FCM/full-screen-notification work). `flutter_callkit_incoming`
-  covers both platforms if you want to unify.
-- Decide whether to keep the native Android UDP stack as a fallback or remove it.
+Settings → Diagnostics shows the signalling, which is enough to tell the two
+apart: a call that reaches `CONFIRMED` with silent audio is a media problem, not
+a signalling one.

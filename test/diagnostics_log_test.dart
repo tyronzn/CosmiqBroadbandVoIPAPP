@@ -48,7 +48,7 @@ void main() {
 
     final text = DiagnosticsLog.asText();
     expect(text, contains('Cosmiq VoIP diagnostics'));
-    expect(text, contains('WSS URL'));
+    expect(text, contains('SIP server'));
     expect(text, contains('SIP domain'));
     expect(text, contains('handshake refused'));
     expect(text, contains('[WS]'));
