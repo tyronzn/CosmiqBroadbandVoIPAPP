@@ -146,8 +146,10 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
       onTimeout: () {
         if (_registrationState != SipRegistrationState.registered) {
           _lastError ??=
-              'The SIP server did not respond within 20 seconds. Check your '
-              'network, and the server in Settings → Connection.';
+              'No reply from the SIP server within 20 seconds. The usual '
+              'cause is a wrong extension or password; it can also mean '
+              'the server is unreachable. Check your details, then '
+              'Settings → Connection.';
           DiagnosticsLog.error('SIP', 'Registration timed out after 20s');
           _registrationState = SipRegistrationState.failed;
           notifyListeners();
