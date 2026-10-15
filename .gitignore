@@ -56,3 +56,10 @@ app.*.map.json
 # Firebase config (per-project keys). Provide your own to enable push — see
 # SETUP_PUSH.md. Without it the app builds with push disabled.
 /android/app/google-services.json
+
+# Native SIP engine sources (BSD-3) are fetched, not vendored - see
+# tools/fetch_native.sh. Keeps the app repo to our own code.
+/native/re/
+/native/baresip/
+/native/build-*/
+/native/mbedtls/
