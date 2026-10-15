@@ -50,12 +50,12 @@ class CosmiqNativeSip(private val onEvent: (event: String, detail: String) -> Un
     var lastStartRc: Int = -99
         private set
 
-    fun start(configPath: String): Boolean {
+    fun start(configPath: String, dnsServers: String): Boolean {
         if (!isAvailable) {
             lastStartRc = -98
             return false
         }
-        lastStartRc = nativeStart(this, configPath)
+        lastStartRc = nativeStart(this, configPath, dnsServers)
         Log.i(TAG, "nativeStart rc=$lastStartRc")
         return lastStartRc == 0
     }
@@ -93,7 +93,11 @@ class CosmiqNativeSip(private val onEvent: (event: String, detail: String) -> Un
     fun transfer(target: String): Boolean = nativeTransfer(target) == 0
     fun inCall(): Boolean = isAvailable && nativeInCall()
 
-    private external fun nativeStart(listener: CosmiqNativeSip, configPath: String): Int
+    private external fun nativeStart(
+        listener: CosmiqNativeSip,
+        configPath: String,
+        dnsServers: String,
+    ): Int
     private external fun nativeStop()
     private external fun nativeRegister(
         user: String, domain: String, password: String,

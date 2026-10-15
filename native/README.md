@@ -106,60 +106,67 @@ Modules built: `account auconv auresamp g711 stun turn ice srtp uuid opensles`.
 5. Add `arm64-v8a` and `armeabi-v7a` for release.
 
 
-## Current state (15 Oct 2026)
+## Status: working on Android
 
-Everything builds, links, loads and starts. One bug stands between this and a
-working registration.
-
-**Working, verified on the emulator:**
-
-- `libcosmiqsip.so` (1.45 MB) builds as part of the normal Gradle build and
-  ships in the APK with every JNI entry point exported.
-- The engine starts: `conf_configure`, `baresip_init` and `ua_init` all succeed
-  and the engine thread runs `re_main()`.
-- Network detection works. baresip finds every local address and adds SIP
-  transports for all of them, IPv4 included:
-  `uag: add local address 10.0.2.16`, `10.0.2.15`, plus the IPv6 ones.
-- `ua_alloc()` succeeds - the account parses and is created.
-- Dart to Kotlin to C is wired end to end: the Dart service drives the channel,
-  errors come back with real detail, and baresip's own log is forwarded into
-  logcat under `CosmiqSipNative`.
-
-**The bug:**
+Registers to PortaSIP and places a real connected call, verified on the
+emulator against the live platform:
 
 ```
-ua: ua_register sip:27877299809@voice.cosmiqbroadband.co.za
-ua: SIP register failed: Operation not supported on transport endpoint [95]
+account registered: sip:27877299809@voice.cosmiqbroadband.co.za (udp)
+   ...: {0/UDP/v4} 200 OK () [4 bindings]
+call: SIP Progress: 180 Ringing
+call: got SDP answer (197 bytes)
+stream: enable audio RTP receiver / sender
+audio_recv: Set audio decoder: PCMA 8000Hz 1ch
+Call ... terminated (duration: 14 secs)
 ```
 
-`ua_register()` returns **EOPNOTSUPP (95)** even though UDP transports are bound
-on every local address.
+The far end rang, was answered, carried two-way audio over **plain RTP with
+PCMA**, and hung up cleanly. That is precisely what the WebRTC engine could
+never do, and it is the whole reason for this engine.
 
-Ruled out so far:
+### Four bugs stood between "builds" and "calls"
 
-- Not the AOR format. `ua_alloc` succeeds, and the account is created.
-- Not a pinned transport. Fails identically with `;transport=udp` inside the
-  angle brackets and with no transport parameter at all.
-- Not the default transport. Forcing `sip_transp_set_default(uag_sip(),
-  SIP_TRANSP_UDP)` after `ua_init` changes nothing.
-- Not missing transports. The debug log shows them being added successfully,
-  and `ua: SIP Transport failed` is never printed.
-- **Not baresip's or libre's own code**: `EOPNOTSUPP` appears nowhere in either
-  source tree, so errno 95 is coming back from a syscall.
+Each was misleading in its own way, so they are worth recording.
 
-That last point is the thread to pull. Likely candidates, in order:
+1. **No config location.** baresip looks for a home directory that does not
+   exist in an app sandbox, so `conf_configure()` failed with `ENOENT`. Fixed by
+   `conf_path_set()` pointed at the app's files directory.
 
-1. A socket syscall failing inside the Android sandbox - most plausibly an
-   IPv6 socket being used toward an IPv4 destination, since the IPv6 addresses
-   are enumerated first and `voice.cosmiqbroadband.co.za` is IPv4-only.
-   Worth forcing `net_af` / the address family to AF_INET before `ua_init`.
-2. DNS. libre reads resolver configuration that does not exist on Android;
-   `/etc/resolv.conf` is absent. Check whether the DNS client allocated, and
-   consider supplying nameservers explicitly from Kotlin
-   (`ConnectivityManager` gives them).
-3. Strace-equivalent: build a tiny native test that calls the same path and
-   logs errno at each syscall.
+2. **`ua_alloc()` does not register.** It only creates the account. Nothing goes
+   on the wire until `ua_register()` is called explicitly.
 
-The emulator's own networking is fine - the previous Kotlin stack registers and
-places calls over UDP from this same emulator, so this is specific to how libre
-opens or uses its socket here, not to the environment.
+3. **No DNS, reported as a transport error.** libre discovers nameservers by
+   reading `/etc/resolv.conf`, which Android does not have. With none
+   configured its resolver refuses to query and returns `ENOTSUP`, which
+   surfaced as:
+
+   ```
+   ua: SIP register failed: Operation not supported on transport endpoint [95]
+   ```
+
+   That message is about transports and the cause was DNS, which cost a long
+   detour. Note `EOPNOTSUPP` appears nowhere in baresip or libre - that was the
+   clue that it came from neither. Enabling `getaddrinfo` is not sufficient on
+   its own, because SIP resolves an **SRV** record first and SRV cannot use it;
+   an actual nameserver is required. A fixed resolver (9.9.9.9) is configured
+   rather than the device's: deterministic across networks, and it sidesteps
+   broken or captive carrier DNS.
+
+4. **Modules were never loaded.** baresip's own startup calls `conf_modules()`
+   *after* `ua_init`, and we did not. Without it no codec and no audio driver
+   register, so the SDP offer carries no media and the platform answers every
+   INVITE with **488 Not Acceptable Here**. The giveaway was `use_rtp=0` in the
+   call-alloc log. Related: the config baresip generates is desktop-shaped and
+   selects the `aaudio` driver, which this build excludes (API 28 vs minSdk
+   26) - so the configuration is now supplied in memory via
+   `conf_configure_buf()`, listing only modules that were actually linked.
+
+## Remaining work
+
+1. Verify two-way **audio quality** on a real handset; the emulator microphone
+   is silent, so only signalling and RTP setup are proven here.
+2. Incoming calls, hold, transfer and DTMF through the new engine.
+3. `arm64-v8a` and `armeabi-v7a` builds for release.
+4. iOS: same C core with a Swift bridge, `audiounit` instead of `opensles`, and
+   **no mbedTLS at all** since libre uses Apple's native crypto there.

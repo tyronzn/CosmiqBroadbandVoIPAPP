@@ -16,7 +16,10 @@ import io.flutter.plugin.common.MethodChannel
  * Only outgoing-call and hold states are synthesised here. Everything else is
  * reported by the engine, because only it knows what the far end actually did.
  */
-class CosmiqSipBridge(private val configPath: String) {
+class CosmiqSipBridge(
+    private val configPath: String,
+    private val dnsServers: String,
+) {
 
     companion object {
         private const val TAG = "CosmiqSipBridge"
@@ -43,7 +46,7 @@ class CosmiqSipBridge(private val configPath: String) {
             Log.w(TAG, "native engine absent - build it with tools/build_native_android.sh")
             return false
         }
-        started = engine.start(configPath)
+        started = engine.start(configPath, dnsServers)
         startDetail = if (started) "ok" else "engine start rc=${engine.lastStartRc}"
         Log.i(TAG, "engine start: $startDetail")
         return started

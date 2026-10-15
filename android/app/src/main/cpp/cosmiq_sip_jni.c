@@ -71,10 +71,12 @@ static void event_cb(const char *event, const char *detail, void *arg)
 	Java_za_co_cosmiq_voip_CosmiqNativeSip_##name
 
 JNIEXPORT jint JNICALL JNI_FN(nativeStart)(JNIEnv *env, jobject thiz,
-					   jobject listener, jstring configPath)
+					   jobject listener, jstring configPath,
+					   jstring dnsServers)
 {
 	jclass cls;
 	const char *path;
+	const char *dns;
 
 	LOGI("nativeStart called");
 
@@ -93,12 +95,15 @@ JNIEXPORT jint JNICALL JNI_FN(nativeStart)(JNIEnv *env, jobject thiz,
 	}
 
 	path = configPath ? (*env)->GetStringUTFChars(env, configPath, NULL) : NULL;
+	dns = dnsServers ? (*env)->GetStringUTFChars(env, dnsServers, NULL) : NULL;
 
 	{
-		int err = cosmiq_sip_start(event_cb, NULL, path);
+		int err = cosmiq_sip_start(event_cb, NULL, path, dns);
 		LOGI("cosmiq_sip_start returned %d", err);
 		if (path)
 			(*env)->ReleaseStringUTFChars(env, configPath, path);
+		if (dns)
+			(*env)->ReleaseStringUTFChars(env, dnsServers, dns);
 		return err;
 	}
 }

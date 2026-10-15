@@ -21,3 +21,7 @@ echo "Android additionally needs mbedTLS; see native/README.md."
 # baresip ships every module it supports; trim to the mobile set. See the
 # docstring in trim_modules.py for why this cannot be done with -DMODULES.
 python "$(dirname "$0")/trim_modules.py" "$(dirname "$0")/../native/baresip/cmake/modules.cmake"
+
+# libre's generic HMAC backend only does SHA-1, which breaks SIP registration
+# on an mbedTLS build. See the docstring for the full story.
+python "$(dirname "$0")/patch_libre_hmac.py" "$(dirname "$0")/../native/re/src/hmac/hmac.c"

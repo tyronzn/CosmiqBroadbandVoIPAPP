@@ -1,5 +1,6 @@
 package za.co.cosmiq.voip
 
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -27,7 +28,10 @@ class MainActivity : FlutterActivity() {
 
         // baresip needs a writable directory for its config; the app's own
         // files directory is the only one guaranteed to exist in the sandbox.
-        sip = CosmiqSipBridge(applicationContext.filesDir.absolutePath)
+        sip = CosmiqSipBridge(
+            applicationContext.filesDir.absolutePath,
+            dnsServers(),
+        )
         sip.initialize()
 
         MethodChannel(
@@ -101,6 +105,22 @@ class MainActivity : FlutterActivity() {
             }
         })
     }
+
+    /**
+     * Resolver for the SIP stack.
+     *
+     * libre discovers nameservers by reading /etc/resolv.conf, which Android
+     * does not have. With none configured, SIP's SRV lookup fails with
+     * ENOTSUP and every registration dies reporting a transport error -
+     * nowhere near the truth. A fixed public resolver is used rather than the
+     * device's own: it is deterministic across networks and sidesteps broken
+     * or captive carrier DNS, which is a common cause of a softphone that
+     * works on wifi and not on mobile data.
+     *
+     * The native layer accepts a comma-separated list, so adding more or
+     * switching to the device's resolvers later is a one-line change.
+     */
+    private fun dnsServers(): String = "9.9.9.9"
 
     override fun onDestroy() {
         sip.destroy()

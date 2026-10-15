@@ -39,8 +39,15 @@ typedef void (*cosmiq_event_cb)(const char *event, const char *detail,
  * It has no sensible default on a mobile platform - baresip would look for a
  * home directory that does not exist in an app sandbox - so the caller must
  * supply one (the app's files directory on Android, Documents on iOS).
+ *
+ * `dns_servers` is a comma-separated list of resolver addresses. It is not
+ * optional on Android: libre discovers nameservers by reading
+ * /etc/resolv.conf, which does not exist there, and SIP's SRV lookup cannot
+ * fall back to getaddrinfo. With none configured every REGISTER fails with
+ * ENOTSUP, reported as "Operation not supported on transport endpoint".
  */
-int cosmiq_sip_start(cosmiq_event_cb cb, void *arg, const char *config_path);
+int cosmiq_sip_start(cosmiq_event_cb cb, void *arg, const char *config_path,
+		     const char *dns_servers);
 
 /* Tear the engine down and join its thread. */
 void cosmiq_sip_stop(void);

@@ -35,6 +35,7 @@ static struct {
 	bool started;
 	char domain[256];   /* kept so a bare number can be made into a URI */
 	char config_path[512];
+	char dns_servers[256];
 } g;
 
 /* Init happens on the engine thread, so the caller waits for its result. */
@@ -138,10 +139,39 @@ static int engine_init(void)
 		}
 	}
 
-	err = conf_configure();
-	if (err) {
-		LOGE("conf_configure failed: %d", err);
-		return err;
+	/*
+	 * Supply the configuration rather than letting baresip generate one.
+	 *
+	 * Its defaults are desktop-shaped: they select the aaudio driver,
+	 * which this build deliberately excludes because aaudio needs API 28
+	 * and the app ships minSdk 26. baresip then has no audio device at
+	 * all, offers no media, and the platform answers every INVITE with
+	 * 488 Not Acceptable Here.
+	 *
+	 * Only the modules actually compiled into this build are listed, so
+	 * the config can never drift from what was linked.
+	 */
+	{
+		static const char cfg[] =
+			"audio_player opensles,nil\n"
+			"audio_source opensles,nil\n"
+			"audio_alert opensles,nil\n"
+			"module opensles.so\n"
+			"module g711.so\n"
+			"module auconv.so\n"
+			"module auresamp.so\n"
+			"module account.so\n"
+			"module stun.so\n"
+			"module turn.so\n"
+			"module ice.so\n"
+			"module uuid.so\n";
+
+				err = conf_configure_buf((const uint8_t *)cfg, sizeof(cfg) - 1);
+		if (err) {
+			LOGE("conf_configure_buf failed: %d", err);
+			return err;
+		}
+		LOGI("config: opensles audio, g711 codec");
 	}
 
 	g_baresip_log.h = baresip_log_handler;
@@ -156,6 +186,72 @@ static int engine_init(void)
 	}
 
 	/* UDP and TCP, no TLS - the carrier has no TLS port open. */
+	/*
+	 * Let libre resolve through getaddrinfo.
+	 *
+	 * libre finds its nameservers by reading /etc/resolv.conf, which does
+	 * not exist on Android. With no servers configured its DNS client
+	 * refuses to query at all and returns ENOTSUP, which surfaces much
+	 * later as "SIP register failed: Operation not supported on transport
+	 * endpoint [95]" - an error about transports that has nothing to do
+	 * with transports. Enabling getaddrinfo hands resolution to the
+	 * platform resolver, which works in the sandbox.
+	 */
+	{
+		struct dnsc_conf dnsconf = {
+			.query_hash_size = 16,
+			.tcp_hash_size   = 2,
+			.conn_timeout    = 10 * 1000,
+			.idle_timeout    = 30 * 1000,
+			.cache_ttl_max   = 1800,
+			.getaddrinfo     = true,
+		};
+
+		err = dnsc_conf_set(net_dnsc(baresip_network()), &dnsconf);
+		if (err) {
+			LOGE("dnsc_conf_set failed: %d", err);
+			return err;
+		}
+		LOGI("DNS: resolving via getaddrinfo");
+	}
+
+	/*
+	 * getaddrinfo only covers A and AAAA lookups. SIP resolves an SRV
+	 * record first, which cannot go through it, so an actual nameserver is
+	 * still required. The caller supplies the device resolvers.
+	 */
+	if (g.dns_servers[0]) {
+		enum { MAX_DNS = 8 };
+		struct sa srvv[MAX_DNS];
+		uint32_t srvc = 0;
+		char buf[256];
+		char *tok, *save = NULL;
+
+		re_snprintf(buf, sizeof(buf), "%s", g.dns_servers);
+
+		for (tok = strtok_r(buf, ",", &save);
+		     tok && srvc < MAX_DNS;
+		     tok = strtok_r(NULL, ",", &save)) {
+
+			if (0 == sa_set_str(&srvv[srvc], tok, 53))
+				++srvc;
+			else
+				LOGE("ignoring bad nameserver: %s", tok);
+		}
+
+		if (srvc) {
+			err = dnsc_srv_set(net_dnsc(baresip_network()), srvv, srvc);
+			if (err) {
+				LOGE("dnsc_srv_set failed: %d", err);
+				return err;
+			}
+			LOGI("DNS: %u nameserver(s) configured", srvc);
+		}
+	}
+	else {
+		LOGE("DNS: no nameservers supplied - SIP SRV lookups will fail");
+	}
+
 	err = ua_init("Cosmiq VoIP", true, true, false);
 	if (err) {
 		LOGE("ua_init failed: %d", err);
@@ -169,6 +265,18 @@ static int engine_init(void)
 	 * register then fails with EOPNOTSUPP even though UDP is bound. Pin it.
 	 */
 	sip_transp_set_default(uag_sip(), SIP_TRANSP_UDP);
+
+	/*
+	 * Load the modules the config asked for. baresip's own startup does
+	 * this after ua_init, and without it nothing is registered - no codec,
+	 * no audio driver - so the SDP offer carries no media and the platform
+	 * answers every INVITE with 488 Not Acceptable Here.
+	 */
+	err = conf_modules();
+	if (err) {
+		LOGE("conf_modules failed: %d", err);
+		return err;
+	}
 
 	LOGI("engine initialised");
 
@@ -207,7 +315,8 @@ static void *engine_thread(void *arg)
 	return NULL;
 }
 
-int cosmiq_sip_start(cosmiq_event_cb cb, void *arg, const char *config_path)
+int cosmiq_sip_start(cosmiq_event_cb cb, void *arg, const char *config_path,
+		     const char *dns_servers)
 {
 	int err;
 
@@ -219,6 +328,8 @@ int cosmiq_sip_start(cosmiq_event_cb cb, void *arg, const char *config_path)
 	g.cb_arg = arg;
 	if (config_path)
 		re_snprintf(g.config_path, sizeof(g.config_path), "%s", config_path);
+	if (dns_servers)
+		re_snprintf(g.dns_servers, sizeof(g.dns_servers), "%s", dns_servers);
 	init_done = false;
 	init_err = 0;
 
