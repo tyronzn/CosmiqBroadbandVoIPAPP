@@ -17,3 +17,7 @@ clone https://github.com/baresip/baresip.git baresip
 echo
 echo "Fetched. Both are 3-clause BSD - see each LICENSE file."
 echo "Android additionally needs mbedTLS; see native/README.md."
+
+# baresip ships every module it supports; trim to the mobile set. See the
+# docstring in trim_modules.py for why this cannot be done with -DMODULES.
+python "$(dirname "$0")/trim_modules.py" "$(dirname "$0")/../native/baresip/cmake/modules.cmake"

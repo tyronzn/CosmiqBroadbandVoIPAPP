@@ -62,4 +62,5 @@ app.*.map.json
 /native/re/
 /native/baresip/
 /native/build-*/
+/native/prefix-*/
 /native/mbedtls/

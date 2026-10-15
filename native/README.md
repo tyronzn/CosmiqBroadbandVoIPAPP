@@ -51,38 +51,56 @@ only to satisfy libre's build.
 
 ## Android build
 
-Verified working: the NDK toolchain configures and compiles libre (110+ objects
-before the HMAC backend stop, which mbedTLS resolves).
+`tools/build_native_android.sh [abi] [api]` builds the whole chain and is the
+only thing you should need. It defaults to `x86_64` / API 26 (the emulator and
+the app's minSdk). **Status: working** - it produces
 
-```bash
-NDK=$ANDROID_HOME/ndk/28.2.13676358
-CM=$ANDROID_HOME/cmake/3.22.1/bin
+| library | size |
+|---|---|
+| `libre.a` | 6.9 MB |
+| `libbaresip.a` | 3.2 MB |
+| `libmbedcrypto.a` | 4.8 MB |
 
-$CM/cmake -S re -B build-and-x86_64 -G Ninja \
-  -DCMAKE_MAKE_PROGRAM=$CM/ninja \
-  -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
-  -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-26 \
-  -DUSE_OPENSSL=OFF -DLIBRE_BUILD_SHARED=OFF -DCMAKE_BUILD_TYPE=Release \
-  -DOPENSSL_INCLUDE_DIR= -DOPENSSL_CRYPTO_LIBRARY= -DOPENSSL_SSL_LIBRARY=
-```
+Modules built: `account auconv auresamp g711 stun turn ice srtp uuid opensles`.
 
-Two quirks worth knowing:
+### Things that cost time, recorded so they cost nothing next time
 
-1. libre's `test/` subdirectory is added unconditionally
-   (`add_subdirectory(test EXCLUDE_FROM_ALL)`) and references the OpenSSL
-   variables. It never builds, but it must *configure*, hence passing the three
-   empty `OPENSSL_*` values above rather than patching vendored code.
-2. `ANDROID_ABI=x86_64` targets the emulator. Release builds also need
-   `arm64-v8a` and `armeabi-v7a`.
+1. **mbedTLS from git has no generated sources.** Release tarballs ship
+   `error.c` and `ssl_debug_helpers_generated.c`; a clone does not. Pass
+   `-DGEN_FILES=ON`, which needs perl and the python modules listed in
+   `mbedtls/scripts/basic.requirements.txt` (jinja2, jsonschema).
+2. **libre adds `test/` unconditionally** and that target references the
+   `OPENSSL_*` variables, so they must be defined - empty is fine - even with
+   `USE_OPENSSL=OFF`. Same applies when configuring baresip, where a
+   `NOTFOUND` leaks into the modules' include paths.
+3. **`MBEDTLS_*` are find-module cache variables.** Setting them directly
+   short-circuits the search, which the Android toolchain otherwise confines to
+   the NDK sysroot, so `MBEDTLS_HINTS` is ignored.
+4. **libre never adds `MBEDTLS_INCLUDE_DIRS` to its include path** - the
+   variable is referenced nowhere in its CMakeLists - so the headers have to
+   come in through `CMAKE_C_FLAGS`. Upstream gap.
+5. **baresip needs libre *installed***, not just built: it does
+   `find_package(re CONFIG)` and wants `lib/cmake/re/re-config.cmake`.
+6. **`FindV4L2.cmake` calls `find_package(PkgConfig REQUIRED)`**, which
+   hard-fails on Windows. The module list is hard-set rather than a cache
+   variable, so `tools/trim_modules.py` rewrites it to the mobile set.
+7. **The `aaudio` module requires API 28** (`AAudioStreamBuilder_setSessionId`
+   and friends) while the app ships **minSdk 26**. Dropped in favour of
+   `opensles`. Revisit if minSdk ever moves to 28 - AAudio has lower latency.
+8. **baresip's executable target fails to link** because it does not pull in
+   mbedTLS. Harmless: we want `libbaresip.a`, and our own wrapper does the
+   final link.
 
 ## Remaining work
 
-1. Cross-compile mbedTLS for Android and rebuild libre against it.
-2. Build the baresip core plus the modules we need (`g711`, `aaudio`/
-   `opensles`, `audiounit`, `stun`/`turn`/`ice`).
-3. A thin C wrapper exposing register / call / answer / hangup / mute / hold /
-   DTMF / transfer and an event callback.
-4. JNI bridge for Android, Swift bridge for iOS, behind the existing
+1. A thin C wrapper over baresip exposing register / call / answer / hangup /
+   mute / hold / DTMF / transfer plus an event callback, linking
+   `libbaresip.a` + `libre.a` + mbedTLS into one `.so`.
+2. JNI bridge for Android, Swift bridge for iOS, behind the existing
    `SipService` interface so the UI and AppState do not change.
-5. Prove it on the Android emulator against PortaSIP before touching the Mac -
-   the same sequencing that caught the WebRTC media problem cheaply.
+3. Prove it on the Android emulator against PortaSIP - registration, then a
+   call with **plain RTP/AVP** - before any Mac is involved. That sequencing is
+   what caught the WebRTC media problem cheaply.
+4. iOS build: same sources, `audiounit` instead of `opensles`, and **no
+   mbedTLS at all** since libre uses Apple's native crypto there.
+5. Add `arm64-v8a` and `armeabi-v7a` for release.
