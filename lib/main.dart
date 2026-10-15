@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'theme/cosmiq_theme.dart';
 import 'services/app_state.dart';
+import 'services/connection_settings.dart';
 import 'services/push_service.dart';
 import 'screens/splash_screen.dart';
 
@@ -22,6 +23,9 @@ void main() async {
       statusBarIconBrightness: Brightness.dark,
     ),
   );
+
+  // Load any on-device endpoint overrides before anything tries to register.
+  await ConnectionSettings.load();
 
   // Push notifications for incoming calls (no-op if Firebase isn't configured).
   await PushService.init();

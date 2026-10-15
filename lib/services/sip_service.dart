@@ -1,33 +1,36 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import '../models/server_config.dart';
-import '../models/call_record.dart';
 
-/// Registration state
+import '../models/call_record.dart';
+import 'connection_settings.dart';
+import 'diagnostics_log.dart';
+
+/// Registration state (unchanged public enum, so the UI is untouched).
 enum SipRegistrationState { unregistered, registering, registered, failed }
 
-/// Call state
+/// Call state.
 enum SipCallState { none, calling, ringing, confirmed, held, ended }
 
-/// SIP service — communicates with native Android Linphone SDK
-/// via Flutter MethodChannel and EventChannel.
-/// Supports UDP port 5060 natively.
+/// SIP service driving the native engine (baresip + libre) over a platform
+/// channel.
+///
+/// The engine is shared C, so Android and iOS behave identically and this class
+/// never needs to know which it is talking to. It replaced a WebRTC engine that
+/// could register but never place a call: PortaSIP accepts plain RTP/AVP and
+/// rejects WebRTC DTLS-SRTP, which a control test proved rather than assumed.
 class SipService extends ChangeNotifier {
-  static final _log = Logger(printer: PrettyPrinter(methodCount: 0));
-
-  // Channels — must match MainActivity.kt channel names exactly
-  static const _methodChannel =
-      MethodChannel('za.co.cosmiq.voip/sip');
-  static const _regEventChannel =
+  static const MethodChannel _channel = MethodChannel('za.co.cosmiq.voip/sip');
+  static const EventChannel _registrationEvents =
       EventChannel('za.co.cosmiq.voip/registration');
-  static const _callEventChannel =
+  static const EventChannel _callEvents =
       EventChannel('za.co.cosmiq.voip/calls');
 
-  // State
+  StreamSubscription<dynamic>? _regSub;
+  StreamSubscription<dynamic>? _callSub;
+
   SipRegistrationState _registrationState = SipRegistrationState.unregistered;
   SipCallState _callState = SipCallState.none;
   String _remoteIdentity = '';
@@ -36,21 +39,10 @@ class SipService extends ChangeNotifier {
   bool _isSpeaker = false;
   bool _isHeld = false;
   String? _registeredExtension;
-
-  // Preferred codec: 'PCMU' (µ-law), 'PCMA' (A-law) or 'G729'. Persisted locally
-  // and pushed to the native layer, which offers it first in call SDP.
-  static const _codecPrefKey = 'cosmiq_preferred_codec';
-  String _preferredCodec = 'PCMU';
-  bool _g729Available = false;
-
-  // Stream subscriptions
-  StreamSubscription? _regSub;
-  StreamSubscription? _callSub;
-
-  // Resolves when a register() attempt settles (registered / failed / timeout).
+  String? _lastError;
   Completer<bool>? _registerCompleter;
+  bool _initialised = false;
 
-  // Getters
   SipRegistrationState get registrationState => _registrationState;
   SipCallState get callState => _callState;
   String get remoteIdentity => _remoteIdentity;
@@ -60,75 +52,44 @@ class SipService extends ChangeNotifier {
   bool get isHeld => _isHeld;
   bool get isInCall => _callState != SipCallState.none;
   String? get registeredExtension => _registeredExtension;
-  String get preferredCodec => _preferredCodec;
-  bool get g729Available => _g729Available;
 
-  /// Fired when a call ends — saves to call history
+  /// Why the last registration or call attempt failed, phrased so the user can
+  /// act on it. Null when nothing has failed since the last success.
+  String? get lastError => _lastError;
+
+  /// baresip negotiates the codec itself, and g711 (PCMA/PCMU) is the module
+  /// built in, so there is nothing to choose. Kept so Settings has something
+  /// honest to display.
+  String get preferredCodec => 'PCMA';
+  bool get g729Available => false;
+  Future<void> setPreferredCodec(String codec) async {}
+
+  /// Fired when a call ends, so the history can record it.
   void Function(CallRecord)? onCallEnded;
 
-  /// Start listening to native event channels.
-  /// Idempotent — safe to call again on re-login without leaking subscriptions.
   Future<void> initialize() async {
-    await _regSub?.cancel();
-    await _callSub?.cancel();
+    if (_initialised) return;
+    _initialised = true;
 
-    _regSub = _regEventChannel
+    _regSub = _registrationEvents
         .receiveBroadcastStream()
-        .listen(_onRegistrationEvent, onError: _onError);
-
-    _callSub = _callEventChannel
+        .listen(_onRegistrationEvent, onError: _onStreamError);
+    _callSub = _callEvents
         .receiveBroadcastStream()
-        .listen(_onCallEvent, onError: _onError);
+        .listen(_onCallEvent, onError: _onStreamError);
 
-    // Is the native G.729 (bcg729) codec available on this device?
-    _g729Available = await _checkG729Available();
-
-    // Restore the saved codec preference and push it to the native layer.
-    // The native side returns the codec it actually applied (e.g. it falls back
-    // to PCMU if G.729 was saved but isn't available).
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(_codecPrefKey) ?? 'PCMU';
-    _preferredCodec = await _pushCodecToNative(saved);
-
-    _log.i('SIP service initialized (native Kotlin/UDP), codec=$_preferredCodec, '
-        'g729=$_g729Available');
+    DiagnosticsLog.info('SIP', 'Native engine channel ready');
   }
 
-  Future<bool> _checkG729Available() async {
-    try {
-      return (await _methodChannel.invokeMethod('isG729Available')) == true;
-    } catch (_) {
-      return false;
+  Future<bool> _ensureMicPermission() async {
+    final status = await Permission.microphone.request();
+    if (!status.isGranted) {
+      DiagnosticsLog.warn('SIP', 'Microphone permission denied');
     }
+    return status.isGranted;
   }
 
-  Future<String> _pushCodecToNative(String codec) async {
-    try {
-      final applied =
-          await _methodChannel.invokeMethod('setPreferredCodec', {'codec': codec});
-      return (applied as String?) ?? codec;
-    } catch (e) {
-      _log.w('Failed to set codec: $e');
-      return codec;
-    }
-  }
-
-  /// Change the preferred call codec ('PCMU', 'PCMA' or 'G729'). Persists and
-  /// applies to the next call.
-  Future<void> setPreferredCodec(String codec) async {
-    final up = codec.toUpperCase();
-    final requested = (up == 'PCMA' || up == 'G729') ? up : 'PCMU';
-    final applied = await _pushCodecToNative(requested);
-    if (applied == _preferredCodec) return;
-    _preferredCodec = applied;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_codecPrefKey, _preferredCodec);
-    notifyListeners();
-  }
-
-  /// Register with PortaSIP — UDP port 5060.
-  /// Returns true once the native layer reports a successful REGISTER, false on
-  /// failure or timeout. This is the app's primary auth gate.
+  /// Register. Resolves when the server answers, or after 20 seconds.
   Future<bool> register({
     required String extension,
     required String password,
@@ -136,38 +97,54 @@ class SipService extends ChangeNotifier {
     String? pushParam,
     String? pushToken,
   }) async {
+    await initialize();
+    await _ensureMicPermission();
+
+    // A second register() while one is in flight would otherwise strand the
+    // first caller's future until it times out.
+    _completeRegister(false);
+
+    _lastError = null;
     _registrationState = SipRegistrationState.registering;
     _registeredExtension = extension;
     notifyListeners();
+
+    DiagnosticsLog.info(
+      'SIP',
+      'Registering $extension@${ConnectionSettings.sipDomain} via '
+          '${ConnectionSettings.sipHost}:${ConnectionSettings.sipPort}',
+    );
 
     final completer = Completer<bool>();
     _registerCompleter = completer;
 
     try {
-      await _methodChannel.invokeMethod('register', {
+      await _channel.invokeMethod<bool>('register', <String, dynamic>{
         'username': extension,
         'password': password,
-        'domain': ServerConfig.sipServer,
-        // RFC 8599 push params — tells PortaSIP where to push incoming calls.
-        'pushProvider': pushProvider ?? '',
-        'pushParam': pushParam ?? '',
-        'pushToken': pushToken ?? '',
+        'domain': ConnectionSettings.sipDomain,
+        'transport': 'udp',
       });
-      _log.i('SIP register called for $extension');
-    } catch (e) {
-      _log.e('Register failed: $e');
+    } on PlatformException catch (e) {
+      _lastError = e.code == 'NO_ENGINE'
+          ? 'The calling engine is missing from this build.'
+          : 'Could not start registration (${e.message}).';
+      DiagnosticsLog.error('SIP', 'register failed: ${e.code} ${e.message}');
       _registrationState = SipRegistrationState.failed;
       notifyListeners();
       _completeRegister(false);
     }
 
-    // Wait for the native registration event, with a safety timeout so a
-    // silent server never hangs the login flow.
     return completer.future.timeout(
       const Duration(seconds: 20),
       onTimeout: () {
-        _log.w('SIP registration timed out');
         if (_registrationState != SipRegistrationState.registered) {
+          _lastError ??=
+              'No reply from the SIP server within 20 seconds. The usual '
+              'cause is a wrong extension or password; it can also mean the '
+              'server is unreachable. Check your details, then '
+              'Settings and Connection.';
+          DiagnosticsLog.error('SIP', 'Registration timed out after 20s');
           _registrationState = SipRegistrationState.failed;
           notifyListeners();
         }
@@ -176,59 +153,46 @@ class SipService extends ChangeNotifier {
     );
   }
 
-  /// Resolve a pending register() future exactly once.
-  void _completeRegister(bool success) {
-    final c = _registerCompleter;
-    _registerCompleter = null;
-    if (c != null && !c.isCompleted) c.complete(success);
-  }
-
-  /// Unregister
   Future<void> unregister() async {
     try {
-      await _methodChannel.invokeMethod('unregister');
-    } catch (_) {}
-    _regSub?.cancel();
-    _callSub?.cancel();
+      await _channel.invokeMethod('unregister');
+    } on PlatformException catch (_) {}
+    DiagnosticsLog.info('SIP', 'Unregistered');
     _registrationState = SipRegistrationState.unregistered;
     _registeredExtension = null;
+    _lastError = null;
     notifyListeners();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Call actions
-  // ---------------------------------------------------------------------------
-
-  /// Request the microphone runtime permission. Audio capture (and therefore
-  /// the call) cannot start without it on Android.
-  Future<bool> _ensureMicPermission() async {
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) _log.w('Microphone permission not granted: $status');
-    return status.isGranted;
   }
 
   Future<void> makeCall(String target) async {
     if (_callState != SipCallState.none) return;
-    if (!await _ensureMicPermission()) return;
 
-    final dest = target
-        .replaceAll('sip:', '')
-        .split('@')
-        .first;
+    // Distinguish "not registered" from a rejected call, otherwise dialling
+    // while offline silently does nothing.
+    if (_registrationState != SipRegistrationState.registered) {
+      _lastError =
+          'Not registered, so the call cannot be placed. See Settings.';
+      DiagnosticsLog.error('CALL', 'Dial refused: not registered');
+      notifyListeners();
+      return;
+    }
+    if (!await _ensureMicPermission()) {
+      _lastError = 'Microphone permission is required to make a call.';
+      DiagnosticsLog.error('CALL', 'Dial refused: microphone denied');
+      notifyListeners();
+      return;
+    }
 
-    _remoteIdentity = dest;
-    _callState = SipCallState.calling;
-    notifyListeners();
+    _lastError = null;
+    DiagnosticsLog.info('CALL', 'Dialling $target');
 
     try {
-      await _methodChannel.invokeMethod('makeCall', {
-        'target': dest,
-        'domain': ServerConfig.sipServer,
+      await _channel.invokeMethod('makeCall', <String, dynamic>{
+        'target': target,
       });
-    } catch (e) {
-      _log.e('makeCall error: $e');
-      _callState = SipCallState.none;
-      _remoteIdentity = '';
+    } on PlatformException catch (e) {
+      _lastError = 'The call could not be started (${e.message}).';
+      DiagnosticsLog.error('CALL', 'makeCall failed: ${e.message}');
       notifyListeners();
     }
   }
@@ -236,126 +200,172 @@ class SipService extends ChangeNotifier {
   Future<void> answerCall() async {
     if (!await _ensureMicPermission()) return;
     try {
-      await _methodChannel.invokeMethod('answerCall');
-    } catch (e) {
-      _log.e('answerCall error: $e');
+      await _channel.invokeMethod('answerCall');
+    } on PlatformException catch (e) {
+      DiagnosticsLog.error('CALL', 'answer failed: ${e.message}');
     }
   }
 
   Future<void> hangUp() async {
     try {
-      await _methodChannel.invokeMethod('hangUp');
-    } catch (_) {}
-    _endCall(CallStatus.answered);
+      await _channel.invokeMethod('hangUp');
+    } on PlatformException catch (e) {
+      DiagnosticsLog.error('CALL', 'hangup failed: ${e.message}');
+    }
   }
 
-  Future<void> rejectCall() async {
+  Future<void> rejectCall() => hangUp();
+
+  Future<void> toggleMute() async {
     try {
-      await _methodChannel.invokeMethod('hangUp');
-    } catch (_) {}
-    _endCall(CallStatus.rejected);
+      await _channel.invokeMethod('toggleMute');
+      _isMuted = !_isMuted;
+      notifyListeners();
+    } on PlatformException catch (_) {}
   }
 
-  void toggleMute() {
-    _isMuted = !_isMuted;
-    _methodChannel.invokeMethod('toggleMute').catchError((_) {});
-    notifyListeners();
-  }
-
-  void toggleSpeaker() {
-    _isSpeaker = !_isSpeaker;
-    _methodChannel.invokeMethod('toggleSpeaker').catchError((_) {});
-    notifyListeners();
+  Future<void> toggleSpeaker() async {
+    try {
+      await _channel.invokeMethod('toggleSpeaker');
+      _isSpeaker = !_isSpeaker;
+      notifyListeners();
+    } on PlatformException catch (_) {}
   }
 
   Future<void> toggleHold() async {
-    final target = !_isHeld;
     try {
-      final res = await _methodChannel.invokeMethod('setHold', {'hold': target});
-      _isHeld = (res as bool?) ?? target;
-    } catch (e) {
-      _log.e('Hold error: $e');
-    }
-    notifyListeners();
+      await _channel.invokeMethod('setHold', <String, dynamic>{
+        'hold': !_isHeld,
+      });
+    } on PlatformException catch (_) {}
   }
 
-  void sendDtmf(String tone) {
-    _methodChannel
-        .invokeMethod('sendDtmf', {'tone': tone})
-        .catchError((_) {});
+  Future<void> sendDtmf(String tone) async {
+    try {
+      await _channel.invokeMethod('sendDtmf', <String, dynamic>{'tone': tone});
+    } on PlatformException catch (_) {}
   }
 
   Future<bool> transferCall(String target) async {
     try {
-      final res = await _methodChannel.invokeMethod('transferCall', {'target': target});
-      return res == true;
-    } catch (e) {
-      _log.e('Transfer error: $e');
+      await _channel.invokeMethod('transferCall', <String, dynamic>{
+        'target': target,
+      });
+      DiagnosticsLog.info('CALL', 'Transferring to $target');
+      return true;
+    } on PlatformException catch (e) {
+      DiagnosticsLog.error('CALL', 'transfer failed: ${e.message}');
       return false;
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Event handlers
+  // Events from the native engine
   // ---------------------------------------------------------------------------
 
   void _onRegistrationEvent(dynamic event) {
-    final state = event.toString().toUpperCase();
-    _log.i('Registration event: $state');
+    final raw = event.toString();
+    final state = raw.toUpperCase();
+    DiagnosticsLog.info('SIP', 'Registration: $raw');
 
-    if (state.contains('REGISTERED') && !state.contains('UN')) {
+    if (state.contains('UNREGISTERED')) {
+      _registrationState = SipRegistrationState.unregistered;
+    } else if (state.contains('REGISTERED')) {
+      _lastError = null;
       _registrationState = SipRegistrationState.registered;
       _completeRegister(true);
     } else if (state.contains('FAILED')) {
+      _lastError = _friendlyRegisterError(raw);
       _registrationState = SipRegistrationState.failed;
       _completeRegister(false);
-    } else if (state.contains('REGISTERING') || state.contains('PROGRESS')) {
-      _registrationState = SipRegistrationState.registering;
-    } else if (state.contains('UNREGISTERED') || state.contains('CLEARED')) {
-      _registrationState = SipRegistrationState.unregistered;
     }
     notifyListeners();
   }
 
   void _onCallEvent(dynamic event) {
     final raw = event.toString();
-    final state = raw.split(':').first.toUpperCase();
-    final identity = raw.contains(':') ? raw.split(':').last : '';
+    final parts = raw.split(':');
+    final state = parts.first.toUpperCase();
+    final identity = parts.length > 1 ? parts.sublist(1).join(':') : '';
 
-    _log.i('Call event: $state identity: $identity');
+    DiagnosticsLog.info('CALL', raw);
 
     switch (state) {
       case 'OUTGOING':
+        if (identity.isNotEmpty) _remoteIdentity = identity;
         _callState = SipCallState.calling;
         break;
       case 'INCOMING':
+        if (identity.isNotEmpty) _remoteIdentity = identity;
         _callState = SipCallState.ringing;
-        _remoteIdentity = identity;
         break;
       case 'RINGING':
-        // Outbound call is ringing at the far end — stay in the calling state.
-        _callState = SipCallState.calling;
+        if (identity.isNotEmpty) _remoteIdentity = identity;
+        // An inbound call stays "ringing"; an outbound one is still dialling.
+        if (_callState != SipCallState.ringing) {
+          _callState = SipCallState.calling;
+        }
         break;
       case 'CONNECTED':
-        _callState = SipCallState.confirmed;
-        _callStartTime = DateTime.now();
         if (identity.isNotEmpty) _remoteIdentity = identity;
+        _callStartTime ??= DateTime.now();
+        _isHeld = false;
+        _callState = SipCallState.confirmed;
         break;
       case 'HELD':
+        _isHeld = true;
         _callState = SipCallState.held;
         break;
       case 'ENDED':
-        _endCall(CallStatus.answered);
+        _endCall(_callStartTime != null
+            ? CallStatus.answered
+            : CallStatus.rejected);
         return;
       case 'ERROR':
-        _endCall(CallStatus.missed);
+        _lastError = identity.isEmpty ? 'Call failed.' : 'Call failed: $identity';
+        DiagnosticsLog.error('CALL', _lastError!);
+        _endCall(CallStatus.rejected);
         return;
     }
     notifyListeners();
   }
 
-  void _onError(dynamic error) {
-    _log.e('SIP channel error: $error');
+  void _onStreamError(dynamic error) {
+    DiagnosticsLog.error('SIP', 'Event stream error: $error');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  /// Turn a registration failure into something the user can act on.
+  String _friendlyRegisterError(String raw) {
+    final detail = raw.contains(':') ? raw.split(':').sublist(1).join(':') : '';
+    final text = detail.toLowerCase();
+
+    if (text.contains('401') ||
+        text.contains('403') ||
+        text.contains('auth')) {
+      return 'Extension or password rejected by the server.';
+    }
+    if (text.contains('404')) {
+      return 'That extension does not exist on the server.';
+    }
+    if (text.contains('408') || text.contains('timeout')) {
+      return 'The server did not respond in time.';
+    }
+    if (text.contains('503')) {
+      return 'The server is temporarily unavailable. Try again shortly.';
+    }
+    return detail.isEmpty
+        ? 'Registration failed. Check your extension and password.'
+        : 'Registration failed ($detail).';
+  }
+
+  void _completeRegister(bool success) {
+    final c = _registerCompleter;
+    _registerCompleter = null;
+    if (c != null && !c.isCompleted) c.complete(success);
   }
 
   void _endCall(CallStatus status) {
@@ -364,7 +374,7 @@ class SipService extends ChangeNotifier {
         : Duration.zero;
 
     if (_remoteIdentity.isNotEmpty && onCallEnded != null) {
-      final record = CallRecord.fromSipCall(
+      onCallEnded!(CallRecord.fromSipCall(
         remoteNumber: _remoteIdentity,
         direction: status == CallStatus.missed
             ? CallDirection.incoming
@@ -372,8 +382,7 @@ class SipService extends ChangeNotifier {
         status: status,
         timestamp: _callStartTime ?? DateTime.now(),
         duration: duration,
-      );
-      onCallEnded!(record);
+      ));
     }
 
     _callState = SipCallState.none;

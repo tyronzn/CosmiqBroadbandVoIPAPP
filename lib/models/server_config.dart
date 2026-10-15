@@ -29,6 +29,10 @@ class ServerConfig {
   /// SIP realm / domain
   static const String sipRealm = 'voice.cosmiqbroadband.co.za';
 
+  /// SIP domain used in the SIP URI, as sip:<extension>@<sipDomain>.
+  static const String sipDomain = sipRealm;
+
+
   /// Domain that the account self-care API login requires as a mandatory field.
   /// PortaBilling identifies the account by login + domain; for these accounts
   /// it is the SIP service domain.

@@ -4,6 +4,9 @@ import '../services/app_state.dart';
 import '../services/sip_service.dart';
 import '../theme/cosmiq_theme.dart';
 import '../models/server_config.dart';
+import '../services/connection_settings.dart';
+import 'connection_screen.dart';
+import 'diagnostics_screen.dart';
 import 'login_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -102,6 +105,52 @@ class SettingsScreen extends StatelessWidget {
                                 SipRegistrationState.registered
                             ? CosmiqColors.teal
                             : CosmiqColors.hangupRed,
+                        isLast: sip.lastError == null,
+                      ),
+                      // Show the actual reason rather than leaving a bare
+                      // "Failed" for the user to guess at.
+                      if (sip.lastError != null)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                          child: Text(
+                            sip.lastError!,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              height: 1.35,
+                              color: CosmiqColors.hangupRed,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+
+                  // The WebRTC gateway address is provider-specific and often
+                  // needs correcting in the field, so it's editable here.
+                  _SectionHeader('Connection'),
+                  _GroupCard(
+                    children: [
+                      _SettingsRow(
+                        label: 'WebRTC gateway',
+                        value:
+                            ConnectionSettings.isOverridden ? 'Custom' : 'Default',
+                        showChevron: true,
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const ConnectionScreen(),
+                          ),
+                        ),
+                      ),
+                      _SettingsRow(
+                        label: 'Diagnostics',
+                        value: 'Connection log',
+                        showChevron: true,
+                        isLast: true,
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const DiagnosticsScreen(),
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -148,12 +197,13 @@ class SettingsScreen extends StatelessWidget {
                         showChevron: true,
                         onTap: () => _toggleDnd(context, appState),
                       ),
+                      // WebRTC negotiates the codec itself, so a picker here
+                      // would imply a choice this engine doesn't actually have.
                       _SettingsRow(
                         label: 'Audio codec',
-                        value: _codecLabel(sip.preferredCodec),
-                        showChevron: true,
+                        value: 'Opus (automatic)',
                         isLast: true,
-                        onTap: () => _showCodecPicker(context, sip),
+                        onTap: () => _showCodecInfo(context),
                       ),
                     ],
                   ),
@@ -272,74 +322,22 @@ class SettingsScreen extends StatelessWidget {
     appState.billing.setDnd(!current);
   }
 
-  static String _codecLabel(String codec) {
-    switch (codec) {
-      case 'PCMA':
-        return 'A-law (PCMA)';
-      case 'G729':
-        return 'G.729';
-      case 'PCMU':
-      default:
-        return 'μ-law (PCMU)';
-    }
-  }
-
-  void _showCodecPicker(BuildContext context, SipService sip) {
-    showModalBottomSheet(
+  void _showCodecInfo(BuildContext context) {
+    showDialog(
       context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (sheetContext) {
-        Widget option(String code, String title, String subtitle) {
-          final selected = sip.preferredCodec == code;
-          return ListTile(
-            title: Text(title),
-            subtitle: Text(subtitle,
-                style: const TextStyle(
-                    fontSize: 12, color: CosmiqColors.textSecondary)),
-            trailing: selected
-                ? const Icon(Icons.check, color: CosmiqColors.teal)
-                : null,
-            onTap: () {
-              sip.setPreferredCodec(code);
-              Navigator.pop(sheetContext);
-            },
-          );
-        }
-
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('Audio codec',
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w600)),
-                ),
-              ),
-              option('PCMU', 'μ-law (PCMU)', 'G.711 µ-law — default'),
-              option('PCMA', 'A-law (PCMA)', 'G.711 A-law — common in SA/EU'),
-              if (sip.g729Available)
-                option('G729', 'G.729', 'Low-bandwidth (8 kbit/s) — bcg729')
-              else
-                const ListTile(
-                  enabled: false,
-                  title: Text('G.729', style: TextStyle(color: Colors.grey)),
-                  subtitle: Text(
-                    'Not available — native codec failed to load',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                ),
-              const SizedBox(height: 8),
-            ],
+      builder: (_) => AlertDialog(
+        title: const Text('Audio codec'),
+        content: const Text(
+          'Calls use WebRTC, which negotiates the best codec with the server '
+          'automatically — normally Opus. There is nothing to choose here.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 
