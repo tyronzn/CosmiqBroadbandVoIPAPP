@@ -1,30 +1,35 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:logger/logger.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:sip_ua/sip_ua.dart';
-import '../models/server_config.dart';
+
 import '../models/call_record.dart';
 import 'connection_settings.dart';
 import 'diagnostics_log.dart';
 
-/// Registration state (unchanged public enum so the UI doesn't change).
+/// Registration state (unchanged public enum, so the UI is untouched).
 enum SipRegistrationState { unregistered, registering, registered, failed }
 
 /// Call state.
 enum SipCallState { none, calling, ringing, confirmed, held, ended }
 
-/// Portable SIP service backed by dart-sip-ua (SIP over TCP) + WebRTC
-/// media — runs identically on Android and iOS. Replaces the Android-only
-/// native UDP stack. Registers over plain SIP/TCP to the voice platform, so
-/// it needs no WebRTC gateway (see ConnectionSettings).
-class SipService extends ChangeNotifier implements SipUaHelperListener {
-  static final _log = Logger(printer: PrettyPrinter(methodCount: 0));
+/// SIP service driving the native engine (baresip + libre) over a platform
+/// channel.
+///
+/// The engine is shared C, so Android and iOS behave identically and this class
+/// never needs to know which it is talking to. It replaced a WebRTC engine that
+/// could register but never place a call: PortaSIP accepts plain RTP/AVP and
+/// rejects WebRTC DTLS-SRTP, which a control test proved rather than assumed.
+class SipService extends ChangeNotifier {
+  static const MethodChannel _channel = MethodChannel('za.co.cosmiq.voip/sip');
+  static const EventChannel _registrationEvents =
+      EventChannel('za.co.cosmiq.voip/registration');
+  static const EventChannel _callEvents =
+      EventChannel('za.co.cosmiq.voip/calls');
 
-  final SIPUAHelper _helper = SIPUAHelper();
-  Call? _activeCall;
-  MediaStream? _remoteStream;
+  StreamSubscription<dynamic>? _regSub;
+  StreamSubscription<dynamic>? _callSub;
 
   SipRegistrationState _registrationState = SipRegistrationState.unregistered;
   SipCallState _callState = SipCallState.none;
@@ -34,14 +39,9 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
   bool _isSpeaker = false;
   bool _isHeld = false;
   String? _registeredExtension;
-  Completer<bool>? _registerCompleter;
-  bool _listenerAdded = false;
   String? _lastError;
-
-  // WebRTC negotiates Opus/G.711 automatically; kept for UI compatibility.
-  String get preferredCodec => 'Opus';
-  bool get g729Available => false;
-  Future<void> setPreferredCodec(String codec) async {}
+  Completer<bool>? _registerCompleter;
+  bool _initialised = false;
 
   SipRegistrationState get registrationState => _registrationState;
   SipCallState get callState => _callState;
@@ -57,24 +57,39 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
   /// act on it. Null when nothing has failed since the last success.
   String? get lastError => _lastError;
 
-  /// Fired when a call ends — saves to call history.
+  /// baresip negotiates the codec itself, and g711 (PCMA/PCMU) is the module
+  /// built in, so there is nothing to choose. Kept so Settings has something
+  /// honest to display.
+  String get preferredCodec => 'PCMA';
+  bool get g729Available => false;
+  Future<void> setPreferredCodec(String codec) async {}
+
+  /// Fired when a call ends, so the history can record it.
   void Function(CallRecord)? onCallEnded;
 
   Future<void> initialize() async {
-    if (!_listenerAdded) {
-      _helper.addSipUaHelperListener(this);
-      _listenerAdded = true;
-    }
+    if (_initialised) return;
+    _initialised = true;
+
+    _regSub = _registrationEvents
+        .receiveBroadcastStream()
+        .listen(_onRegistrationEvent, onError: _onStreamError);
+    _callSub = _callEvents
+        .receiveBroadcastStream()
+        .listen(_onCallEvent, onError: _onStreamError);
+
+    DiagnosticsLog.info('SIP', 'Native engine channel ready');
   }
 
   Future<bool> _ensureMicPermission() async {
     final status = await Permission.microphone.request();
-    if (!status.isGranted) _log.w('Microphone permission not granted: $status');
+    if (!status.isGranted) {
+      DiagnosticsLog.warn('SIP', 'Microphone permission denied');
+    }
     return status.isGranted;
   }
 
-  /// Register over SIP/TCP. [pushProvider]/[pushParam]/[pushToken] are accepted for
-  /// API compatibility (push is handled separately per platform).
+  /// Register. Resolves when the server answers, or after 20 seconds.
   Future<bool> register({
     required String extension,
     required String password,
@@ -85,21 +100,8 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     await initialize();
     await _ensureMicPermission();
 
-    // Fail immediately on an unusable endpoint instead of burning the 20s
-    // timeout on a connection that can never open.
-    final endpointProblem =
-        ConnectionSettings.validateSipHost(ConnectionSettings.sipHost) ??
-            ConnectionSettings.validateSipPort(ConnectionSettings.sipPort);
-    if (endpointProblem != null) {
-      _lastError = 'SIP server is not configured. $endpointProblem';
-      DiagnosticsLog.error('SIP', _lastError!);
-      _registrationState = SipRegistrationState.failed;
-      notifyListeners();
-      return false;
-    }
-
-    // A second register() while one is still in flight would otherwise strand
-    // the first caller's future until it times out.
+    // A second register() while one is in flight would otherwise strand the
+    // first caller's future until it times out.
     _completeRegister(false);
 
     _lastError = null;
@@ -109,36 +111,28 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
 
     DiagnosticsLog.info(
       'SIP',
-      'Registering $extension@${ConnectionSettings.sipDomain} '
-          'via ${ConnectionSettings.sipHost}:${ConnectionSettings.sipPort} (TCP)',
+      'Registering $extension@${ConnectionSettings.sipDomain} via '
+          '${ConnectionSettings.sipHost}:${ConnectionSettings.sipPort}',
     );
 
     final completer = Completer<bool>();
     _registerCompleter = completer;
 
-    final settings = UaSettings()
-      ..host = ConnectionSettings.sipHost
-      ..port = ConnectionSettings.sipPort
-      ..uri = 'sip:$extension@${ConnectionSettings.sipDomain}'
-      ..authorizationUser = extension
-      ..password = password
-      ..displayName = extension
-      ..userAgent = 'Cosmiq VoIP'
-      ..dtmfMode = DtmfMode.RFC2833
-      ..transportType = TransportType.TCP
-      ..register = true
-      ..iceServers = [
-        {'urls': ServerConfig.stunServer},
-      ];
-
     try {
-      await _helper.start(settings);
-    } catch (e) {
-      _lastError = 'Could not open a connection to the SIP server ($e).';
-      DiagnosticsLog.error('SIP', 'helper.start() threw: $e');
+      await _channel.invokeMethod<bool>('register', <String, dynamic>{
+        'username': extension,
+        'password': password,
+        'domain': ConnectionSettings.sipDomain,
+        'transport': 'udp',
+      });
+    } on PlatformException catch (e) {
+      _lastError = e.code == 'NO_ENGINE'
+          ? 'The calling engine is missing from this build.'
+          : 'Could not start registration (${e.message}).';
+      DiagnosticsLog.error('SIP', 'register failed: ${e.code} ${e.message}');
       _registrationState = SipRegistrationState.failed;
       notifyListeners();
-      if (!completer.isCompleted) completer.complete(false);
+      _completeRegister(false);
     }
 
     return completer.future.timeout(
@@ -147,9 +141,9 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
         if (_registrationState != SipRegistrationState.registered) {
           _lastError ??=
               'No reply from the SIP server within 20 seconds. The usual '
-              'cause is a wrong extension or password; it can also mean '
-              'the server is unreachable. Check your details, then '
-              'Settings → Connection.';
+              'cause is a wrong extension or password; it can also mean the '
+              'server is unreachable. Check your details, then '
+              'Settings and Connection.';
           DiagnosticsLog.error('SIP', 'Registration timed out after 20s');
           _registrationState = SipRegistrationState.failed;
           notifyListeners();
@@ -161,11 +155,8 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
 
   Future<void> unregister() async {
     try {
-      _helper.unregister();
-      // Also drop the socket. Without this the transport stays open and a
-      // later register() can reuse a half-dead connection.
-      _helper.stop();
-    } catch (_) {}
+      await _channel.invokeMethod('unregister');
+    } on PlatformException catch (_) {}
     DiagnosticsLog.info('SIP', 'Unregistered');
     _registrationState = SipRegistrationState.unregistered;
     _registeredExtension = null;
@@ -173,18 +164,14 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
     notifyListeners();
   }
 
-  // ---------------------------------------------------------------------------
-  // Call actions
-  // ---------------------------------------------------------------------------
-
   Future<void> makeCall(String target) async {
     if (_callState != SipCallState.none) return;
 
-    // Distinguish "not registered" from "call rejected" — otherwise a dial
-    // attempt while offline just silently does nothing.
-    if (!_helper.registered) {
+    // Distinguish "not registered" from a rejected call, otherwise dialling
+    // while offline silently does nothing.
+    if (_registrationState != SipRegistrationState.registered) {
       _lastError =
-          'Not registered, so the call cannot be placed. See Settings → Status.';
+          'Not registered, so the call cannot be placed. See Settings.';
       DiagnosticsLog.error('CALL', 'Dial refused: not registered');
       notifyListeners();
       return;
@@ -196,259 +183,189 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
       return;
     }
 
-    final dest = target.replaceAll('sip:', '').split('@').first;
-    final uri = 'sip:$dest@${ConnectionSettings.sipDomain}';
-    _remoteIdentity = dest;
-    _callState = SipCallState.calling;
     _lastError = null;
-    notifyListeners();
+    DiagnosticsLog.info('CALL', 'Dialling $target');
 
-    DiagnosticsLog.info('CALL', 'Dialling $uri');
-
-    final ok = await _helper.call(uri, voiceOnly: true);
-    if (!ok) {
-      _lastError = 'The call could not be started.';
-      DiagnosticsLog.error('CALL', 'helper.call() returned false for $uri');
-      _callState = SipCallState.none;
-      _remoteIdentity = '';
+    try {
+      await _channel.invokeMethod('makeCall', <String, dynamic>{
+        'target': target,
+      });
+    } on PlatformException catch (e) {
+      _lastError = 'The call could not be started (${e.message}).';
+      DiagnosticsLog.error('CALL', 'makeCall failed: ${e.message}');
       notifyListeners();
     }
   }
 
   Future<void> answerCall() async {
     if (!await _ensureMicPermission()) return;
-    _activeCall?.answer(_helper.buildCallOptions(true));
+    try {
+      await _channel.invokeMethod('answerCall');
+    } on PlatformException catch (e) {
+      DiagnosticsLog.error('CALL', 'answer failed: ${e.message}');
+    }
   }
 
   Future<void> hangUp() async {
-    _activeCall?.hangup();
-  }
-
-  Future<void> rejectCall() async {
-    _activeCall?.hangup();
-    _endCall(CallStatus.rejected);
-  }
-
-  void toggleMute() {
-    final call = _activeCall;
-    if (call == null) return;
-    if (_isMuted) {
-      call.unmute(true, false);
-    } else {
-      call.mute(true, false);
+    try {
+      await _channel.invokeMethod('hangUp');
+    } on PlatformException catch (e) {
+      DiagnosticsLog.error('CALL', 'hangup failed: ${e.message}');
     }
   }
 
-  void toggleSpeaker() {
-    _isSpeaker = !_isSpeaker;
-    Helper.setSpeakerphoneOn(_isSpeaker);
-    notifyListeners();
+  Future<void> rejectCall() => hangUp();
+
+  Future<void> toggleMute() async {
+    try {
+      await _channel.invokeMethod('toggleMute');
+      _isMuted = !_isMuted;
+      notifyListeners();
+    } on PlatformException catch (_) {}
   }
 
-  void toggleHold() {
-    final call = _activeCall;
-    if (call == null) return;
-    if (_isHeld) {
-      call.unhold();
-    } else {
-      call.hold();
-    }
+  Future<void> toggleSpeaker() async {
+    try {
+      await _channel.invokeMethod('toggleSpeaker');
+      _isSpeaker = !_isSpeaker;
+      notifyListeners();
+    } on PlatformException catch (_) {}
   }
 
-  void sendDtmf(String tone) {
-    _activeCall?.sendDTMF(tone);
+  Future<void> toggleHold() async {
+    try {
+      await _channel.invokeMethod('setHold', <String, dynamic>{
+        'hold': !_isHeld,
+      });
+    } on PlatformException catch (_) {}
+  }
+
+  Future<void> sendDtmf(String tone) async {
+    try {
+      await _channel.invokeMethod('sendDtmf', <String, dynamic>{'tone': tone});
+    } on PlatformException catch (_) {}
   }
 
   Future<bool> transferCall(String target) async {
-    final call = _activeCall;
-    if (call == null) return false;
-    DiagnosticsLog.info('CALL', 'Transferring to $target');
-    call.refer('sip:$target@${ConnectionSettings.sipDomain}');
-    return true;
+    try {
+      await _channel.invokeMethod('transferCall', <String, dynamic>{
+        'target': target,
+      });
+      DiagnosticsLog.info('CALL', 'Transferring to $target');
+      return true;
+    } on PlatformException catch (e) {
+      DiagnosticsLog.error('CALL', 'transfer failed: ${e.message}');
+      return false;
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // SipUaHelperListener
+  // Events from the native engine
   // ---------------------------------------------------------------------------
 
-  @override
-  void registrationStateChanged(RegistrationState state) {
-    switch (state.state) {
-      case RegistrationStateEnum.REGISTERED:
-        _lastError = null;
-        _registrationState = SipRegistrationState.registered;
-        DiagnosticsLog.info('SIP', 'Registered as $_registeredExtension');
-        _completeRegister(true);
-        break;
-      case RegistrationStateEnum.REGISTRATION_FAILED:
-        _lastError = _friendlyRegisterError(state.cause);
-        _registrationState = SipRegistrationState.failed;
-        DiagnosticsLog.error(
-          'SIP',
-          'Registration failed — '
-              '${_causeText(state.cause) ?? "no cause reported"}',
-        );
-        _completeRegister(false);
-        break;
-      case RegistrationStateEnum.UNREGISTERED:
-        _registrationState = SipRegistrationState.unregistered;
-        DiagnosticsLog.info('SIP', 'Unregistered by server');
-        break;
-      default:
-        break;
+  void _onRegistrationEvent(dynamic event) {
+    final raw = event.toString();
+    final state = raw.toUpperCase();
+    DiagnosticsLog.info('SIP', 'Registration: $raw');
+
+    if (state.contains('UNREGISTERED')) {
+      _registrationState = SipRegistrationState.unregistered;
+    } else if (state.contains('REGISTERED')) {
+      _lastError = null;
+      _registrationState = SipRegistrationState.registered;
+      _completeRegister(true);
+    } else if (state.contains('FAILED')) {
+      _lastError = _friendlyRegisterError(raw);
+      _registrationState = SipRegistrationState.failed;
+      _completeRegister(false);
     }
     notifyListeners();
   }
 
-  @override
-  void transportStateChanged(TransportState state) {
-    switch (state.state) {
-      case TransportStateEnum.CONNECTING:
-        DiagnosticsLog.info('TCP',
-            'Connecting to ${ConnectionSettings.sipHost}:${ConnectionSettings.sipPort}');
+  void _onCallEvent(dynamic event) {
+    final raw = event.toString();
+    final parts = raw.split(':');
+    final state = parts.first.toUpperCase();
+    final identity = parts.length > 1 ? parts.sublist(1).join(':') : '';
+
+    DiagnosticsLog.info('CALL', raw);
+
+    switch (state) {
+      case 'OUTGOING':
+        if (identity.isNotEmpty) _remoteIdentity = identity;
+        _callState = SipCallState.calling;
         break;
-      case TransportStateEnum.CONNECTED:
-        DiagnosticsLog.info('TCP', 'Connected to the SIP server');
+      case 'INCOMING':
+        if (identity.isNotEmpty) _remoteIdentity = identity;
+        _callState = SipCallState.ringing;
         break;
-      case TransportStateEnum.DISCONNECTED:
-        final cause = _causeText(state.cause);
-        DiagnosticsLog.error(
-            'TCP', 'Disconnected${cause != null ? " — $cause" : ""}');
-        // A transport drop mid-registration would otherwise leave the login
-        // spinner running until the 20s timeout with nothing to explain it.
-        if (_registrationState == SipRegistrationState.registering ||
-            _registrationState == SipRegistrationState.registered) {
-          _lastError = 'Lost the connection to the SIP server'
-              '${cause != null ? " ($cause)" : ""}. Check your network.';
-          _registrationState = SipRegistrationState.failed;
+      case 'RINGING':
+        if (identity.isNotEmpty) _remoteIdentity = identity;
+        // An inbound call stays "ringing"; an outbound one is still dialling.
+        if (_callState != SipCallState.ringing) {
+          _callState = SipCallState.calling;
         }
-        _completeRegister(false);
         break;
-      case TransportStateEnum.NONE:
-        break;
-    }
-    notifyListeners();
-  }
-
-  @override
-  void callStateChanged(Call call, CallState state) {
-    _activeCall = call;
-    final isIncoming = call.direction == 'INCOMING';
-
-    DiagnosticsLog.info('CALL',
-        '${state.state.name} (${isIncoming ? "incoming" : "outgoing"})');
-
-    switch (state.state) {
-      case CallStateEnum.CALL_INITIATION:
-        _remoteIdentity = call.remote_identity ?? _remoteIdentity;
-        _callState = isIncoming ? SipCallState.ringing : SipCallState.calling;
-        break;
-      case CallStateEnum.PROGRESS:
-      case CallStateEnum.CONNECTING:
-        _callState = isIncoming ? SipCallState.ringing : SipCallState.calling;
-        break;
-      case CallStateEnum.ACCEPTED:
-      case CallStateEnum.CONFIRMED:
-        _callState = SipCallState.confirmed;
+      case 'CONNECTED':
+        if (identity.isNotEmpty) _remoteIdentity = identity;
         _callStartTime ??= DateTime.now();
-        break;
-      case CallStateEnum.STREAM:
-        // Remote audio plays automatically on mobile; hold a ref to keep it alive.
-        if (state.stream != null && state.originator == 'remote') {
-          _remoteStream = state.stream;
-        }
-        break;
-      case CallStateEnum.HOLD:
-        _isHeld = true;
-        _callState = SipCallState.held;
-        break;
-      case CallStateEnum.UNHOLD:
         _isHeld = false;
         _callState = SipCallState.confirmed;
         break;
-      case CallStateEnum.MUTED:
-        _isMuted = true;
+      case 'HELD':
+        _isHeld = true;
+        _callState = SipCallState.held;
         break;
-      case CallStateEnum.UNMUTED:
-        _isMuted = false;
-        break;
-      case CallStateEnum.FAILED:
-        final failCause = _causeText(state.cause);
-        _lastError =
-            failCause != null ? 'Call failed — $failCause' : 'Call failed.';
-        DiagnosticsLog.error('CALL', _lastError!);
-        // "Missed" means an inbound call we didn't pick up; a failed outbound
-        // attempt is not that.
-        _endCall(isIncoming ? CallStatus.missed : CallStatus.rejected);
-        return;
-      case CallStateEnum.ENDED:
+      case 'ENDED':
         _endCall(_callStartTime != null
             ? CallStatus.answered
-            : (isIncoming ? CallStatus.missed : CallStatus.rejected));
+            : CallStatus.rejected);
         return;
-      case CallStateEnum.NONE:
-      case CallStateEnum.REFER:
-        break;
+      case 'ERROR':
+        _lastError = identity.isEmpty ? 'Call failed.' : 'Call failed: $identity';
+        DiagnosticsLog.error('CALL', _lastError!);
+        _endCall(CallStatus.rejected);
+        return;
     }
     notifyListeners();
   }
 
-  @override
-  void onNewMessage(SIPMessageRequest msg) {}
-
-  @override
-  void onNewNotify(Notify ntf) {}
-
-  @override
-  void onNewReinvite(ReInvite event) {}
+  void _onStreamError(dynamic error) {
+    DiagnosticsLog.error('SIP', 'Event stream error: $error');
+  }
 
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
+  /// Turn a registration failure into something the user can act on.
+  String _friendlyRegisterError(String raw) {
+    final detail = raw.contains(':') ? raw.split(':').sublist(1).join(':') : '';
+    final text = detail.toLowerCase();
+
+    if (text.contains('401') ||
+        text.contains('403') ||
+        text.contains('auth')) {
+      return 'Extension or password rejected by the server.';
+    }
+    if (text.contains('404')) {
+      return 'That extension does not exist on the server.';
+    }
+    if (text.contains('408') || text.contains('timeout')) {
+      return 'The server did not respond in time.';
+    }
+    if (text.contains('503')) {
+      return 'The server is temporarily unavailable. Try again shortly.';
+    }
+    return detail.isEmpty
+        ? 'Registration failed. Check your extension and password.'
+        : 'Registration failed ($detail).';
+  }
+
   void _completeRegister(bool success) {
     final c = _registerCompleter;
     _registerCompleter = null;
     if (c != null && !c.isCompleted) c.complete(success);
-  }
-
-  // sip_ua's ErrorCause type lives under src/ and isn't exported from the
-  // package barrel, so these take dynamic rather than importing package
-  // internals. Both are only ever called with a `state.cause`.
-
-  /// Compact "code reason" summary of a sip_ua error cause, for the log.
-  String? _causeText(dynamic cause) {
-    if (cause == null) return null;
-    final parts = <String>[];
-    final code = cause.status_code;
-    if (code != null) parts.add(code.toString());
-    final reason = (cause.reason_phrase as String?)?.trim();
-    final raw = (cause.cause as String?)?.trim();
-    if (reason != null && reason.isNotEmpty) {
-      parts.add(reason);
-    } else if (raw != null && raw.isNotEmpty) {
-      parts.add(raw);
-    }
-    return parts.isEmpty ? null : parts.join(' ');
-  }
-
-  /// Turn a registration failure into something the user can act on.
-  String _friendlyRegisterError(dynamic cause) {
-    final code = cause?.status_code as int?;
-    switch (code) {
-      case 401:
-      case 403:
-        return 'Extension or password rejected by the server.';
-      case 404:
-        return 'That extension does not exist on the server.';
-      case 408:
-        return 'The server did not respond in time.';
-      case 503:
-        return 'The server is temporarily unavailable. Try again shortly.';
-    }
-    final detail = _causeText(cause);
-    return 'Registration failed${detail != null ? " ($detail)" : ""}. Check the '
-        'SIP server in Settings → Connection.';
   }
 
   void _endCall(CallStatus status) {
@@ -468,11 +385,6 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
       ));
     }
 
-    try {
-      _remoteStream?.dispose();
-    } catch (_) {}
-    _remoteStream = null;
-    _activeCall = null;
     _callState = SipCallState.none;
     _callStartTime = null;
     _isMuted = false;
@@ -484,10 +396,8 @@ class SipService extends ChangeNotifier implements SipUaHelperListener {
 
   @override
   void dispose() {
-    _helper.removeSipUaHelperListener(this);
-    try {
-      _helper.stop();
-    } catch (_) {}
+    _regSub?.cancel();
+    _callSub?.cancel();
     super.dispose();
   }
 }

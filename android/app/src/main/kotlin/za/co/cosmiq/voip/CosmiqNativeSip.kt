@@ -46,8 +46,19 @@ class CosmiqNativeSip(private val onEvent: (event: String, detail: String) -> Un
         main.post { onEvent(event, detail) }
     }
 
-    fun start(): Boolean =
-        if (!isAvailable) false else nativeStart(this) == 0
+    /** Raw return code of the last start(), for reporting upwards. */
+    var lastStartRc: Int = -99
+        private set
+
+    fun start(configPath: String): Boolean {
+        if (!isAvailable) {
+            lastStartRc = -98
+            return false
+        }
+        lastStartRc = nativeStart(this, configPath)
+        Log.i(TAG, "nativeStart rc=$lastStartRc")
+        return lastStartRc == 0
+    }
 
     fun stop() {
         if (isAvailable) nativeStop()
@@ -63,7 +74,14 @@ class CosmiqNativeSip(private val onEvent: (event: String, detail: String) -> Un
         password: String,
         transport: String = "udp",
         expires: Int = 600,
-    ): Boolean = nativeRegister(user, domain, password, transport, expires) == 0
+    ): Boolean {
+        lastRegisterRc = nativeRegister(user, domain, password, transport, expires)
+        return lastRegisterRc == 0
+    }
+
+    /** Raw return code of the last register(), for reporting upwards. */
+    var lastRegisterRc: Int = -99
+        private set
 
     fun unregister(): Boolean = nativeUnregister() == 0
     fun call(target: String): Boolean = nativeCall(target) == 0
@@ -75,7 +93,7 @@ class CosmiqNativeSip(private val onEvent: (event: String, detail: String) -> Un
     fun transfer(target: String): Boolean = nativeTransfer(target) == 0
     fun inCall(): Boolean = isAvailable && nativeInCall()
 
-    private external fun nativeStart(listener: CosmiqNativeSip): Int
+    private external fun nativeStart(listener: CosmiqNativeSip, configPath: String): Int
     private external fun nativeStop()
     private external fun nativeRegister(
         user: String, domain: String, password: String,

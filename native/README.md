@@ -104,3 +104,62 @@ Modules built: `account auconv auresamp g711 stun turn ice srtp uuid opensles`.
 4. iOS build: same sources, `audiounit` instead of `opensles`, and **no
    mbedTLS at all** since libre uses Apple's native crypto there.
 5. Add `arm64-v8a` and `armeabi-v7a` for release.
+
+
+## Current state (15 Oct 2026)
+
+Everything builds, links, loads and starts. One bug stands between this and a
+working registration.
+
+**Working, verified on the emulator:**
+
+- `libcosmiqsip.so` (1.45 MB) builds as part of the normal Gradle build and
+  ships in the APK with every JNI entry point exported.
+- The engine starts: `conf_configure`, `baresip_init` and `ua_init` all succeed
+  and the engine thread runs `re_main()`.
+- Network detection works. baresip finds every local address and adds SIP
+  transports for all of them, IPv4 included:
+  `uag: add local address 10.0.2.16`, `10.0.2.15`, plus the IPv6 ones.
+- `ua_alloc()` succeeds - the account parses and is created.
+- Dart to Kotlin to C is wired end to end: the Dart service drives the channel,
+  errors come back with real detail, and baresip's own log is forwarded into
+  logcat under `CosmiqSipNative`.
+
+**The bug:**
+
+```
+ua: ua_register sip:27877299809@voice.cosmiqbroadband.co.za
+ua: SIP register failed: Operation not supported on transport endpoint [95]
+```
+
+`ua_register()` returns **EOPNOTSUPP (95)** even though UDP transports are bound
+on every local address.
+
+Ruled out so far:
+
+- Not the AOR format. `ua_alloc` succeeds, and the account is created.
+- Not a pinned transport. Fails identically with `;transport=udp` inside the
+  angle brackets and with no transport parameter at all.
+- Not the default transport. Forcing `sip_transp_set_default(uag_sip(),
+  SIP_TRANSP_UDP)` after `ua_init` changes nothing.
+- Not missing transports. The debug log shows them being added successfully,
+  and `ua: SIP Transport failed` is never printed.
+- **Not baresip's or libre's own code**: `EOPNOTSUPP` appears nowhere in either
+  source tree, so errno 95 is coming back from a syscall.
+
+That last point is the thread to pull. Likely candidates, in order:
+
+1. A socket syscall failing inside the Android sandbox - most plausibly an
+   IPv6 socket being used toward an IPv4 destination, since the IPv6 addresses
+   are enumerated first and `voice.cosmiqbroadband.co.za` is IPv4-only.
+   Worth forcing `net_af` / the address family to AF_INET before `ua_init`.
+2. DNS. libre reads resolver configuration that does not exist on Android;
+   `/etc/resolv.conf` is absent. Check whether the DNS client allocated, and
+   consider supplying nameservers explicitly from Kotlin
+   (`ConnectivityManager` gives them).
+3. Strace-equivalent: build a tiny native test that calls the same path and
+   logs errno at each syscall.
+
+The emulator's own networking is fine - the previous Kotlin stack registers and
+places calls over UDP from this same emulator, so this is specific to how libre
+opens or uses its socket here, not to the environment.

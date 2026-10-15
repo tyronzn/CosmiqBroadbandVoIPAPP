@@ -32,8 +32,15 @@ extern "C" {
 typedef void (*cosmiq_event_cb)(const char *event, const char *detail,
                                 void *arg);
 
-/* Start the engine and its event loop. Call once, before anything else. */
-int cosmiq_sip_start(cosmiq_event_cb cb, void *arg);
+/*
+ * Start the engine and its event loop. Call once, before anything else.
+ *
+ * `config_path` is a writable directory baresip keeps its configuration in.
+ * It has no sensible default on a mobile platform - baresip would look for a
+ * home directory that does not exist in an app sandbox - so the caller must
+ * supply one (the app's files directory on Android, Documents on iOS).
+ */
+int cosmiq_sip_start(cosmiq_event_cb cb, void *arg, const char *config_path);
 
 /* Tear the engine down and join its thread. */
 void cosmiq_sip_stop(void);

@@ -8,7 +8,11 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include <android/log.h>
 #include "cosmiq_sip.h"
+
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "CosmiqSipJni", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "CosmiqSipJni", __VA_ARGS__)
 
 static JavaVM *g_vm;
 static jobject g_listener;      /* global ref to the Kotlin listener */
@@ -67,9 +71,12 @@ static void event_cb(const char *event, const char *detail, void *arg)
 	Java_za_co_cosmiq_voip_CosmiqNativeSip_##name
 
 JNIEXPORT jint JNICALL JNI_FN(nativeStart)(JNIEnv *env, jobject thiz,
-					   jobject listener)
+					   jobject listener, jstring configPath)
 {
 	jclass cls;
+	const char *path;
+
+	LOGI("nativeStart called");
 
 	if (g_listener)
 		(*env)->DeleteGlobalRef(env, g_listener);
@@ -80,10 +87,20 @@ JNIEXPORT jint JNICALL JNI_FN(nativeStart)(JNIEnv *env, jobject thiz,
 					 "(Ljava/lang/String;Ljava/lang/String;)V");
 	(void)thiz;
 
-	if (!g_on_event)
+	if (!g_on_event) {
+		LOGE("onNativeEvent(String,String) not found on listener");
 		return -1;
+	}
 
-	return cosmiq_sip_start(event_cb, NULL);
+	path = configPath ? (*env)->GetStringUTFChars(env, configPath, NULL) : NULL;
+
+	{
+		int err = cosmiq_sip_start(event_cb, NULL, path);
+		LOGI("cosmiq_sip_start returned %d", err);
+		if (path)
+			(*env)->ReleaseStringUTFChars(env, configPath, path);
+		return err;
+	}
 }
 
 JNIEXPORT void JNICALL JNI_FN(nativeStop)(JNIEnv *env, jobject thiz)

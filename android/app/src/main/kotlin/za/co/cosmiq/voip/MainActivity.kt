@@ -5,6 +5,13 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
+/**
+ * Channel wiring between Flutter and the native SIP engine.
+ *
+ * The engine is baresip + libre behind [CosmiqSipBridge]. The channel names and
+ * event formats are unchanged from the previous hand-rolled Kotlin stack, so
+ * the Dart layer did not have to change when the engine did.
+ */
 class MainActivity : FlutterActivity() {
 
     companion object {
@@ -13,92 +20,90 @@ class MainActivity : FlutterActivity() {
         private const val CALL_EVENT_CHANNEL = "za.co.cosmiq.voip/calls"
     }
 
-    private lateinit var sipManager: CosmiqSipManager
+    private lateinit var sip: CosmiqSipBridge
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        sipManager = CosmiqSipManager(applicationContext)
-        sipManager.initialize()
+        // baresip needs a writable directory for its config; the app's own
+        // files directory is the only one guaranteed to exist in the sandbox.
+        sip = CosmiqSipBridge(applicationContext.filesDir.absolutePath)
+        sip.initialize()
 
-        // ---- Method channel (Flutter → Native) ----
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             SIP_METHOD_CHANNEL
         ).setMethodCallHandler { call, result ->
             when (call.method) {
-                "register" -> {
-                    val username = call.argument<String>("username") ?: ""
-                    val password = call.argument<String>("password") ?: ""
-                    val domain = call.argument<String>("domain") ?: ""
-                    val pushProvider = call.argument<String>("pushProvider") ?: ""
-                    val pushParam = call.argument<String>("pushParam") ?: ""
-                    val pushToken = call.argument<String>("pushToken") ?: ""
-                    sipManager.register(
-                        username, password, domain,
-                        pushProvider, pushParam, pushToken, result
-                    )
-                }
-                "unregister" -> sipManager.unregister(result)
-                "makeCall" -> {
-                    val target = call.argument<String>("target") ?: ""
-                    val domain = call.argument<String>("domain") ?: ""
-                    sipManager.makeCall(target, domain, result)
-                }
-                "answerCall" -> sipManager.answerCall(result)
-                "hangUp" -> sipManager.hangUp(result)
-                "setHold" -> {
-                    val hold = call.argument<Boolean>("hold") ?: false
-                    sipManager.setHold(hold, result)
-                }
-                "transferCall" -> {
-                    val target = call.argument<String>("target") ?: ""
-                    sipManager.transferCall(target, result)
-                }
-                "toggleMute" -> sipManager.toggleMute(result)
-                "toggleSpeaker" -> sipManager.toggleSpeaker(result)
-                "setPreferredCodec" -> {
-                    val codec = call.argument<String>("codec") ?: "PCMU"
-                    sipManager.setPreferredCodec(codec, result)
-                }
-                "isG729Available" -> sipManager.isG729Available(result)
-                "sendDtmf" -> {
-                    val tone = call.argument<String>("tone") ?: ""
-                    sipManager.sendDtmf(tone, result)
-                }
+                "register" -> sip.register(
+                    call.argument<String>("username") ?: "",
+                    call.argument<String>("password") ?: "",
+                    call.argument<String>("domain") ?: "",
+                    // PortaSIP answers on both; UDP unless Dart says otherwise.
+                    call.argument<String>("transport") ?: "udp",
+                    result,
+                )
+                "unregister" -> sip.unregister(result)
+                "makeCall" -> sip.makeCall(
+                    call.argument<String>("target") ?: "", result
+                )
+                "answerCall" -> sip.answerCall(result)
+                "hangUp" -> sip.hangUp(result)
+                "setHold" -> sip.setHold(
+                    call.argument<Boolean>("hold") ?: false, result
+                )
+                "transferCall" -> sip.transferCall(
+                    call.argument<String>("target") ?: "", result
+                )
+                "toggleMute" -> sip.toggleMute(result)
+                "sendDtmf" -> sip.sendDtmf(
+                    call.argument<String>("tone") ?: "", result
+                )
+
+                // Speaker routing is handled by the platform audio session, not
+                // the SIP engine; acknowledged so older Dart keeps working.
+                "toggleSpeaker" -> result.success(true)
+
+                // baresip negotiates the codec itself, and g711 (PCMA/PCMU) is
+                // the module built in. Kept so the existing Dart calls resolve.
+                "setPreferredCodec" -> result.success("PCMA")
+                "isG729Available" -> result.success(false)
+
+                "isEngineAvailable" -> result.success(sip.isAvailable)
+
                 else -> result.notImplemented()
             }
         }
 
-        // ---- Registration event channel (Native → Flutter) ----
         EventChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             REG_EVENT_CHANNEL
         ).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                sipManager.setRegistrationSink(events)
+                sip.setRegistrationSink(events)
             }
+
             override fun onCancel(arguments: Any?) {
-                sipManager.setRegistrationSink(null)
+                sip.setRegistrationSink(null)
             }
         })
 
-        // ---- Call event channel (Native → Flutter) ----
         EventChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CALL_EVENT_CHANNEL
         ).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                sipManager.setCallSink(events)
+                sip.setCallSink(events)
             }
+
             override fun onCancel(arguments: Any?) {
-                sipManager.setCallSink(null)
+                sip.setCallSink(null)
             }
         })
     }
 
     override fun onDestroy() {
-        sipManager.destroy()
+        sip.destroy()
         super.onDestroy()
     }
 }

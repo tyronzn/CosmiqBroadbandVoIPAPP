@@ -8,6 +8,20 @@
 #include "cosmiq_sip.h"
 
 /*
+ * libre writes its own diagnostics to stdout, which Android discards, so
+ * engine startup is logged explicitly. Without this a failed init is just a
+ * non-zero return with no indication of which step gave up.
+ */
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "CosmiqSipNative", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "CosmiqSipNative", __VA_ARGS__)
+#else
+#define LOGI(...) do {} while (0)
+#define LOGE(...) do {} while (0)
+#endif
+
+/*
  * All engine state lives here. libre is a single-threaded event loop, so this
  * is only ever touched either from the engine thread itself or under
  * re_thread_enter()/re_thread_leave(), which takes the same lock the loop does.
@@ -20,6 +34,7 @@ static struct {
 	pthread_t thread;
 	bool started;
 	char domain[256];   /* kept so a bare number can be made into a URI */
+	char config_path[512];
 } g;
 
 /* Init happens on the engine thread, so the caller waits for its result. */
@@ -27,6 +42,24 @@ static pthread_mutex_t init_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t init_cnd = PTHREAD_COND_INITIALIZER;
 static bool init_done;
 static int init_err;
+
+/*
+ * baresip writes its diagnostics to stdout, which Android throws away, so
+ * they are forwarded into the platform log. Without this the only thing a
+ * failure leaves behind is an errno, and the reason stays invisible.
+ */
+static void baresip_log_handler(uint32_t level, const char *msg)
+{
+	if (!msg || !*msg)
+		return;
+
+	if (level >= 2)
+		LOGE("%s", msg);
+	else
+		LOGI("%s", msg);
+}
+
+static struct log g_baresip_log;
 
 static void emit(const char *ev, const char *detail)
 {
@@ -86,22 +119,58 @@ static int engine_init(void)
 	int err;
 
 	err = libre_init();
-	if (err)
+	if (err) {
+		LOGE("libre_init failed: %d", err);
 		return err;
+	}
 
-	/* Defaults are fine: no config file is shipped with the app. */
+	/*
+	 * Point baresip at a writable directory before configuring. Without
+	 * this it looks for a home directory that does not exist inside an app
+	 * sandbox and conf_configure() fails with ENOENT. It writes a default
+	 * config there on first run.
+	 */
+	if (g.config_path[0]) {
+		err = conf_path_set(g.config_path);
+		if (err) {
+			LOGE("conf_path_set(%s) failed: %d", g.config_path, err);
+			return err;
+		}
+	}
+
 	err = conf_configure();
-	if (err)
+	if (err) {
+		LOGE("conf_configure failed: %d", err);
 		return err;
+	}
+
+	g_baresip_log.h = baresip_log_handler;
+	log_register_handler(&g_baresip_log);
+	log_enable_info(true);
+	log_enable_debug(true);
 
 	err = baresip_init(conf_config());
-	if (err)
+	if (err) {
+		LOGE("baresip_init failed: %d", err);
 		return err;
+	}
 
 	/* UDP and TCP, no TLS - the carrier has no TLS port open. */
 	err = ua_init("Cosmiq VoIP", true, true, false);
-	if (err)
+	if (err) {
+		LOGE("ua_init failed: %d", err);
 		return err;
+	}
+
+	/*
+	 * baresip ends its transport setup with sip_transp_set_default() using
+	 * whatever the generated config names. On a fresh install that default
+	 * can be a transport this build does not include (TLS), and every
+	 * register then fails with EOPNOTSUPP even though UDP is bound. Pin it.
+	 */
+	sip_transp_set_default(uag_sip(), SIP_TRANSP_UDP);
+
+	LOGI("engine initialised");
 
 	return bevent_register(event_handler, NULL);
 }
@@ -138,7 +207,7 @@ static void *engine_thread(void *arg)
 	return NULL;
 }
 
-int cosmiq_sip_start(cosmiq_event_cb cb, void *arg)
+int cosmiq_sip_start(cosmiq_event_cb cb, void *arg, const char *config_path)
 {
 	int err;
 
@@ -148,6 +217,8 @@ int cosmiq_sip_start(cosmiq_event_cb cb, void *arg)
 	memset(&g, 0, sizeof(g));
 	g.cb = cb;
 	g.cb_arg = arg;
+	if (config_path)
+		re_snprintf(g.config_path, sizeof(g.config_path), "%s", config_path);
 	init_done = false;
 	init_err = 0;
 
@@ -199,10 +270,22 @@ int cosmiq_sip_register(const char *user, const char *domain,
 	 * baresip takes the whole account as one AOR string. auth_pass carries
 	 * the secret, and regint is the re-REGISTER interval in seconds.
 	 */
+	/*
+	 * baresip splits this into URI parameters, which belong inside the
+	 * angle brackets, and account parameters, which follow them. Putting
+	 * transport outside the brackets makes the account fail to parse.
+	 */
+	/*
+	 * No transport parameter: pinning it made ua_register fail with
+	 * EOPNOTSUPP even though UDP transports were bound on every local
+	 * address. Leaving it out lets baresip match a transport itself, and
+	 * the carrier answers on both UDP and TCP anyway.
+	 */
+	(void)transport;
 	re_snprintf(aor, sizeof(aor),
-		    "sip:%s@%s;auth_pass=%s;transport=%s;regint=%d",
-		    user, domain, password ? password : "",
-		    transport ? transport : "udp",
+		    "<sip:%s@%s>;auth_pass=%s;regint=%d",
+		    user, domain,
+		    password ? password : "",
 		    expires > 0 ? expires : 600);
 
 	re_snprintf(g.domain, sizeof(g.domain), "%s", domain);
@@ -210,7 +293,20 @@ int cosmiq_sip_register(const char *user, const char *domain,
 	re_thread_enter();
 	g.ua = mem_deref(g.ua);          /* drop any previous account */
 	err = ua_alloc(&g.ua, aor);
+	if (!err) {
+		/* ua_alloc only creates the account; nothing goes on the wire
+		 * until this. */
+		err = ua_register(g.ua);
+		if (err)
+			LOGE("ua_register failed: %d", err);
+	}
 	re_thread_leave();
+
+	if (err)
+		LOGE("ua_alloc failed: %d", err);
+	else
+		LOGI("account registered: sip:%s@%s (%s)", user, domain,
+		     transport ? transport : "udp");
 
 	return err;
 }
