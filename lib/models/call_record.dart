@@ -44,6 +44,38 @@ class CallRecord {
     );
   }
 
+  /// Serialize for local persistence (Recents that survives app restarts).
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'remoteNumber': remoteNumber,
+        'remoteName': remoteName,
+        'direction': direction.name,
+        'status': status.name,
+        'timestamp': timestamp.toIso8601String(),
+        'durationSeconds': duration.inSeconds,
+        'extensionLabel': extensionLabel,
+      };
+
+  factory CallRecord.fromJson(Map<String, dynamic> json) => CallRecord(
+        id: json['id'] as String,
+        remoteNumber: json['remoteNumber'] as String? ?? '',
+        remoteName: json['remoteName'] as String?,
+        direction: CallDirection.values.firstWhere(
+          (d) => d.name == json['direction'],
+          orElse: () => CallDirection.outgoing,
+        ),
+        status: CallStatus.values.firstWhere(
+          (s) => s.name == json['status'],
+          orElse: () => CallStatus.answered,
+        ),
+        timestamp:
+            DateTime.tryParse(json['timestamp'] as String? ?? '') ?? DateTime.now(),
+        duration: Duration(seconds: (json['durationSeconds'] as num?)?.toInt() ?? 0),
+        extensionLabel: json['extensionLabel'] as String?,
+      );
+
+  bool get isLocal => id.startsWith('local_');
+
   /// Create from a local SIP call event
   factory CallRecord.fromSipCall({
     required String remoteNumber,
