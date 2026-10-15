@@ -25,8 +25,19 @@ management.
 | UI / state (Flutter, Provider) | `lib/` |
 | PortaBilling REST client | `lib/services/portabilling_service.dart` |
 | SIP bridge (Dart ↔ native, MethodChannel) | `lib/services/sip_service.dart` |
-| Native SIP/RTP stack (Kotlin/UDP) | `android/app/src/main/kotlin/za/co/cosmiq/voip/CosmiqSipManager.kt` |
-| G.729 JNI + codec | `android/app/src/main/cpp/` |
+| SIP/RTP engine (baresip + libre, C) | `native/` — see [native/README.md](native/README.md) |
+| C API shared by Android and iOS | `native/cosmiq/cosmiq_sip.{h,c}` |
+| JNI bridge + Kotlin wrapper | `android/app/src/main/cpp/`, `.../CosmiqNativeSip.kt` |
+
+The call engine is **baresip + libre** (3-clause BSD) behind a small C API, so
+Android and iOS run the same engine rather than two implementations that drift.
+It speaks plain **RTP/AVP with PCMA**, which is what the platform accepts; an
+earlier WebRTC-based engine could register but never place a call, because
+PortaSIP rejects DTLS-SRTP.
+
+Building the engine is a separate step from the app's Gradle build:
+`tools/fetch_native.sh` then `tools/build_native_android.sh`. Without it the
+app still builds and runs — just without the engine.
 
 Backends are configured in `lib/models/server_config.dart`:
 
@@ -59,12 +70,36 @@ Without bcg729 the app still builds (G.729 is disabled and not offered; µ-law /
 A-law continue to work). See [THIRD_PARTY.md](THIRD_PARTY.md) for the licensing
 implications of shipping G.729.
 
+## Repository layout
+
+Two branches, deliberately:
+
+| Branch | What it is |
+|--------|------------|
+| `main` | The app. Registers and places calls. |
+| `push-gateway` | The APNs/FCM push gateway (its own service, in `push-gateway/`). Separate until it is deployed. |
+
+Superseded work is kept as tags rather than branches, so the branch list stays
+readable while nothing is lost:
+
+| Tag | What it holds |
+|-----|---------------|
+| `archive/kotlin-engine` | The original hand-rolled Kotlin UDP engine |
+| `archive/ios-webrtc` | The WebRTC engine (dead end — PortaSIP rejects DTLS-SRTP) |
+| `archive/ios-callkit` | iOS CallKit/PushKit work, worth porting when iOS resumes |
+
 ## Status / known limitations
 
-- Voicemail **playback** is not yet implemented (listing/delete are wired to the API).
-- Call **hold** and **transfer** are not yet functional (need in-dialog Record-Route handling).
-- Two-way call **audio** should be validated on a physical device (emulator microphones are unreliable).
-- Some account features depend on correct per-account provisioning on the PortaBilling side.
+- Two-way call **audio** is not yet confirmed on physical hardware. Registration,
+  call setup and RTP negotiation are verified against the live platform, but an
+  emulator microphone proves nothing about audio quality.
+- Only **x86_64** carries the native engine so far; `arm64-v8a` and `armeabi-v7a`
+  are needed for release.
+- **iOS** is not built yet. The C engine is portable; it needs a Swift bridge,
+  `audiounit` instead of `opensles`, and no mbedTLS (Apple provides the crypto).
+- Incoming calls, hold, transfer and DTMF are wired but unverified on the new engine.
+- Voicemail **playback** is not implemented (listing/delete are wired to the API).
+- Some account features depend on correct per-account provisioning on PortaBilling.
 
 ## License
 
