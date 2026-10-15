@@ -50,6 +50,29 @@ Backends are configured in `lib/models/server_config.dart`:
 
 Requires the **Flutter SDK** and the **Android SDK + NDK**.
 
+### JDK version matters
+
+Build with **JDK 21**. AGP 8.x and Gradle 8.x do not run on JDK 25, and the
+failure is unhelpful - Gradle prints the version string and nothing else:
+
+```
+* What went wrong:
+25.0.3
+```
+
+Android Studio ships whatever JDK it ships, and Flutter picks "the JDK bundled
+with the latest Android Studio", so a Studio update can break the build without
+a line of code changing. Pin it instead:
+
+```bash
+flutter config --jdk-dir "<path to JDK 21>"
+```
+
+Moving to JDK 25 is possible but is a **major migration, not a version bump**:
+it needs Gradle 9.1+ (9.6+ for AGP 9.5) and AGP 9.x, which carries breaking
+changes, and Flutter supports its own range of AGP versions. Worth doing
+deliberately and on its own, so a breakage is unambiguous.
+
 ```bash
 flutter pub get
 flutter build apk --debug        # or: flutter run -d <device>
