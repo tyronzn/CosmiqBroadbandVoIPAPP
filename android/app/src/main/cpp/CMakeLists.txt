@@ -33,6 +33,15 @@ set(COSMIQ_NATIVE ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../native)
 set(COSMIQ_PREFIX ${COSMIQ_NATIVE}/prefix-android-${ANDROID_ABI})
 set(COSMIQ_BARESIP_LIB ${COSMIQ_NATIVE}/build-baresip-${ANDROID_ABI}/libbaresip.a)
 
+# CMake's configure fingerprint does not track the results of if(EXISTS ...),
+# so an ABI first configured before tools/build_native_android.sh had run would
+# stay configured without the engine forever - the APK then silently ships that
+# ABI with no libcosmiqsip.so. Listing the archives here makes CMake re-run
+# configure for that ABI as soon as they appear.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${COSMIQ_BARESIP_LIB}
+    ${COSMIQ_PREFIX}/lib/libre.a)
+
 if(EXISTS ${COSMIQ_BARESIP_LIB} AND EXISTS ${COSMIQ_PREFIX}/lib/libre.a)
 
     add_library(cosmiqsip SHARED

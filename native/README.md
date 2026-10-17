@@ -63,6 +63,20 @@ the app's minSdk). **Status: working** - it produces
 
 Modules built: `account auconv auresamp g711 stun turn ice srtp uuid opensles`.
 
+Run it once per ABI. All three the app ships are built and verified in the APK:
+
+| ABI | `libcosmiqsip.so` | used by |
+|---|---|---|
+| `arm64-v8a` | 1.37 MB | every current handset |
+| `armeabi-v7a` | 0.92 MB | older 32-bit handsets |
+| `x86_64` | 1.39 MB | the emulator |
+
+Check an APK really has them - a missing one is silent (see gotcha 9):
+
+```sh
+unzip -l build/app/outputs/flutter-apk/app-debug.apk | grep libcosmiqsip
+```
+
 ### Things that cost time, recorded so they cost nothing next time
 
 1. **mbedTLS from git has no generated sources.** Release tarballs ship
@@ -90,20 +104,22 @@ Modules built: `account auconv auresamp g711 stun turn ice srtp uuid opensles`.
 8. **baresip's executable target fails to link** because it does not pull in
    mbedTLS. Harmless: we want `libbaresip.a`, and our own wrapper does the
    final link.
+9. **A per-ABI CMake configure goes stale and never notices.** The wrapper is
+   wrapped in `if(EXISTS <the static libs>)` so the app still builds before
+   these libs are made - but CMake's configure fingerprint does not track the
+   result of `if(EXISTS ...)`. An ABI first configured *before*
+   `build_native_android.sh` ran for it stays configured without the engine
+   forever, and the APK then silently ships that ABI with **no
+   `libcosmiqsip.so` at all** - it installs and runs, just with no SIP. Fixed
+   by listing the archives in `CMAKE_CONFIGURE_DEPENDS`, which re-runs
+   configure for that ABI the moment they appear. If you ever see a missing
+   ABI anyway, `rm -rf build/.cxx` - note that is **`build/.cxx`**, the dir
+   Flutter puts at the project root, not `android/app/.cxx`.
 
-## Remaining work
-
-1. A thin C wrapper over baresip exposing register / call / answer / hangup /
-   mute / hold / DTMF / transfer plus an event callback, linking
-   `libbaresip.a` + `libre.a` + mbedTLS into one `.so`.
-2. JNI bridge for Android, Swift bridge for iOS, behind the existing
-   `SipService` interface so the UI and AppState do not change.
-3. Prove it on the Android emulator against PortaSIP - registration, then a
-   call with **plain RTP/AVP** - before any Mac is involved. That sequencing is
-   what caught the WebRTC media problem cheaply.
-4. iOS build: same sources, `audiounit` instead of `opensles`, and **no
-   mbedTLS at all** since libre uses Apple's native crypto there.
-5. Add `arm64-v8a` and `armeabi-v7a` for release.
+The plan this section used to carry - C wrapper, JNI bridge, prove it on the
+emulator against PortaSIP with plain RTP/AVP - is done. See
+[Status: working on Android](#status-working-on-android) for what landed and
+[Remaining work](#remaining-work-1) at the end for what is left.
 
 
 ## Status: working on Android
@@ -167,6 +183,5 @@ Each was misleading in its own way, so they are worth recording.
 1. Verify two-way **audio quality** on a real handset; the emulator microphone
    is silent, so only signalling and RTP setup are proven here.
 2. Incoming calls, hold, transfer and DTMF through the new engine.
-3. `arm64-v8a` and `armeabi-v7a` builds for release.
-4. iOS: same C core with a Swift bridge, `audiounit` instead of `opensles`, and
+3. iOS: same C core with a Swift bridge, `audiounit` instead of `opensles`, and
    **no mbedTLS at all** since libre uses Apple's native crypto there.
