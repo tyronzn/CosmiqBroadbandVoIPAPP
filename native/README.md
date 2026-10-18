@@ -104,6 +104,18 @@ unzip -l build/app/outputs/flutter-apk/app-debug.apk | grep libcosmiqsip
 8. **baresip's executable target fails to link** because it does not pull in
    mbedTLS. Harmless: we want `libbaresip.a`, and our own wrapper does the
    final link.
+10. **The emulator mic is silent unless you flip a GUI toggle**, so an
+   outbound call carries PCMA silence and the far end hears nothing. This is
+   the harness, not the app: `-allow-host-audio` and `hw.audioInput=true` only
+   *permit* host capture, and the switch that enables it lives in Extended
+   Controls -> Microphone -> "Virtual microphone uses host audio input". It
+   defaults off, is not persisted to the AVD config, the registry or any ini,
+   and there is no emulator-console command for it - so it must be re-enabled
+   by hand every launch. Confirm the app side is fine by checking that baresip
+   logged `opensles: opening recorder` plus an `audio tx pipeline:` line and
+   that AudioFlinger logged `AudioFlinger's thread ... ready to run`; if those
+   are present the capture path is wired and only the host bridge is mute.
+
 9. **A per-ABI CMake configure goes stale and never notices.** The wrapper is
    wrapped in `if(EXISTS <the static libs>)` so the app still builds before
    these libs are made - but CMake's configure fingerprint does not track the
