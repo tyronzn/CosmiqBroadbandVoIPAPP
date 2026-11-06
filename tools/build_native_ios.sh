@@ -56,6 +56,13 @@ common=(
   # to produce runnable binaries for a device that is not attached, and every
   # check silently comes back false.
   -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
+  # Targeting iOS makes CMake mark every executable MACOSX_BUNDLE, and
+  # baresip's install() lists baresip_exe with no BUNDLE DESTINATION, so the
+  # project fails to *configure* - before anything is compiled, and regardless
+  # of the fact that only the library target is ever built. CMake only forces
+  # this default when the variable is not already defined, so setting it here
+  # wins. Nothing here builds an executable, so it costs nothing.
+  -DCMAKE_MACOSX_BUNDLE=OFF
 )
 
 echo "==> libre ($TAG)"

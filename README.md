@@ -105,7 +105,7 @@ emulator before any handset: prove it compiles before paying for signing.
 
 | Workflow | Needs an Apple account? | What it answers |
 |---|---|---|
-| `ios-compile-check` | No | Do the pods resolve, does the Swift compile, does it link against the iOS SDK? Produces an unsigned `Runner.app`. |
+| `ios-compile-check` | No | Builds the native engine, then an unsigned `Runner.app`, and **fails if `CosmiqSip.framework` is missing or exports no `cosmiq_sip_*` symbols** - a silently engine-less build is the failure mode that already cost a session on Android. |
 | `ios-testflight` | Yes ($99/yr + App Store Connect API key) | Signed build uploaded to TestFlight. Commented out until the membership exists. |
 
 Neither workflow self-triggers. The free tier is 500 minutes a month and an
@@ -142,10 +142,13 @@ readable while nothing is lost:
   the outbound audio direction is still unproven.
 - All three ABIs (`arm64-v8a`, `armeabi-v7a`, `x86_64`) now carry the native
   engine and are verified present in the APK.
-- **iOS builds, but has no SIP engine yet.** The Flutter/CocoaPods/Swift layer
-  compiles green on Codemagic (arm64 `Runner.app`, 20 frameworks, no WebRTC).
-  Still missing: an iOS cross-compile of the C core, a Swift bridge,
-  `audiounit` instead of `opensles`, and no mbedTLS (Apple provides the crypto).
+- **iOS is built and bridged, but unproven on a device.** The same C engine as
+  Android, cross-compiled for `iphoneos arm64` and shipped as a local
+  CocoaPod, with a Swift bridge that mirrors the Android one event for event
+  and additionally owns `AVAudioSession`. It compiles and links; no call has
+  been placed from an iPhone yet.
+- **iOS ships one architecture.** The engine archives are built per-SDK, so a
+  Simulator run needs a second pass of `tools/build_native_ios.sh`.
 - **iOS push will fail at runtime** until `ios/Runner/GoogleService-Info.plist`
   is added. `FirebaseMessaging` links fine without it, so this does not show up
   as a build error - only as a crash in `FirebaseApp.configure()` on device.
