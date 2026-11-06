@@ -74,3 +74,10 @@ app.*.map.json
 /native/prefix-*/
 /native/mbedtls/
 /android/build/
+
+# Staged into the iOS pod by tools/build_native_ios.sh. Only Classes/ and the
+# podspec are ours; everything else here is build output.
+/ios/CosmiqSip/lib/
+/ios/CosmiqSip/src/
+/ios/CosmiqSip/include/
+/ios/CosmiqSip/vendor-include/

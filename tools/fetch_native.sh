@@ -14,14 +14,18 @@ clone() {
 clone https://github.com/baresip/re.git re
 clone https://github.com/baresip/baresip.git baresip
 
+# macOS ships no "python", only "python3", and this script has to run on the
+# Codemagic build machines as well as on Windows. Pick whichever exists.
+if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+
 echo
 echo "Fetched. Both are 3-clause BSD - see each LICENSE file."
 echo "Android additionally needs mbedTLS; see native/README.md."
 
 # baresip ships every module it supports; trim to the mobile set. See the
 # docstring in trim_modules.py for why this cannot be done with -DMODULES.
-python "$(dirname "$0")/trim_modules.py" "$(dirname "$0")/../native/baresip/cmake/modules.cmake"
+"$PY" "$(dirname "$0")/trim_modules.py" "$(dirname "$0")/../native/baresip/cmake/modules.cmake"
 
 # libre's generic HMAC backend only does SHA-1, which breaks SIP registration
 # on an mbedTLS build. See the docstring for the full story.
-python "$(dirname "$0")/patch_libre_hmac.py" "$(dirname "$0")/../native/re/src/hmac/hmac.c"
+"$PY" "$(dirname "$0")/patch_libre_hmac.py" "$(dirname "$0")/../native/re/src/hmac/hmac.c"

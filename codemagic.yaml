@@ -37,7 +37,14 @@ workflows:
       cache_paths:
         - $HOME/.pub-cache
         - $HOME/Library/Caches/CocoaPods
-        - $CM_BUILD_DIR/ios/Pods
+        # The libre/baresip clones, not their build output. fetch_native.sh
+        # skips cloning when they are present but still re-applies its patches,
+        # so this is safe to reuse.
+        - $CM_BUILD_DIR/native/re
+        - $CM_BUILD_DIR/native/baresip
+        # ios/Pods is deliberately NOT cached. On Android a cached per-ABI
+        # CMake configure silently shipped an APK with no engine in it, and a
+        # stale pod tree is the same class of bug for the sake of a minute.
 
     scripts:
       - name: Toolchain versions
@@ -58,6 +65,24 @@ workflows:
       - name: Unit tests
         script: flutter test
 
+      - name: Ensure CMake
+        script: |
+          command -v cmake >/dev/null 2>&1 || brew install cmake
+          cmake --version
+
+      - name: Fetch native engine sources
+        # libre and baresip are not vendored (see native/README.md), so they
+        # are cloned here. Cached between builds, and the script is a no-op
+        # when they are already present.
+        script: |
+          chmod +x tools/*.sh
+          tools/fetch_native.sh
+
+      - name: Build native SIP engine
+        # Device arm64 only. The Simulator would need a second slice, and CI
+        # builds for a device - adding it would double this step for nothing.
+        script: tools/build_native_ios.sh iphoneos arm64 13.0
+
       - name: Build unsigned iOS
         # Generates ios/Podfile on first run and drives pod install itself.
         script: flutter build ios --release --no-codesign
@@ -65,15 +90,27 @@ workflows:
       - name: Report what landed in the app bundle
         # The iOS equivalent of the per-ABI check that caught the missing
         # arm64 engine on Android - a silently absent binary is the failure
-        # mode worth guarding against.
+        # mode worth guarding against, and it cost a real debugging session
+        # there. Fails the build rather than reporting a bundle with no SIP.
         script: |
           APP=build/ios/iphoneos/Runner.app
-          echo "--- bundle ---"
-          ls -la "$APP" || true
           echo "--- frameworks ---"
-          ls -la "$APP/Frameworks" 2>/dev/null || echo "(none)"
+          ls "$APP/Frameworks" 2>/dev/null || echo "(none)"
           echo "--- main binary arch ---"
           lipo -info "$APP/Runner" 2>/dev/null || true
+
+          echo "--- SIP engine present? ---"
+          ENGINE="$APP/Frameworks/CosmiqSip.framework/CosmiqSip"
+          if [ ! -f "$ENGINE" ]; then
+            echo "FAIL: CosmiqSip.framework is not in the bundle."
+            echo "The app would install and run with no SIP at all."
+            exit 1
+          fi
+          lipo -info "$ENGINE"
+          echo "--- engine symbols (should be non-zero) ---"
+          n=$(nm -gU "$ENGINE" 2>/dev/null | grep -c "_cosmiq_sip_" || true)
+          echo "cosmiq_sip_* exported: $n"
+          [ "$n" -gt 0 ] || { echo "FAIL: engine linked but exports nothing"; exit 1; }
 
     artifacts:
       - build/ios/iphoneos/Runner.app

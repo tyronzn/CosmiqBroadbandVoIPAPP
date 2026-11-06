@@ -16,6 +16,34 @@
 #include <android/log.h>
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "CosmiqSipNative", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "CosmiqSipNative", __VA_ARGS__)
+#elif defined(__APPLE__)
+/*
+ * os_log rather than printf: it survives into the device log, so a call
+ * that misbehaves on a TestFlight build can be read back afterwards with
+ * Console.app instead of having to be reproduced under a debugger.
+ *
+ * %{public}s is not optional. os_log redacts plain %s coming from a
+ * non-system binary, which would reduce every one of these lines to
+ * "<private>" exactly when they are wanted.
+ */
+#include <os/log.h>
+#include <stdarg.h>
+static void cosmiq_log(int is_err, const char *fmt, ...)
+{
+	char buf[1024];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+
+	if (is_err)
+		os_log_error(OS_LOG_DEFAULT, "CosmiqSipNative: %{public}s", buf);
+	else
+		os_log(OS_LOG_DEFAULT, "CosmiqSipNative: %{public}s", buf);
+}
+#define LOGI(...) cosmiq_log(0, __VA_ARGS__)
+#define LOGE(...) cosmiq_log(1, __VA_ARGS__)
 #else
 #define LOGI(...) do {} while (0)
 #define LOGE(...) do {} while (0)
@@ -152,11 +180,31 @@ static int engine_init(void)
 	 * the config can never drift from what was linked.
 	 */
 	{
+		/*
+		 * The audio driver is the only part of this configuration that
+		 * differs by platform. Codec, resampling and NAT traversal are
+		 * identical, which is the whole point of one C engine under
+		 * both apps.
+		 *
+		 * Apple uses audiounit, which is built on
+		 * kAudioUnitSubType_VoiceProcessingIO and so brings echo
+		 * cancellation, AGC and noise suppression with it. It does NOT
+		 * configure AVAudioSession - that is the Swift bridge's job,
+		 * and without it there is no microphone and no routing.
+		 */
+#if defined(__APPLE__)
+		static const char cfg[] =
+			"audio_player audiounit,nil\n"
+			"audio_source audiounit,nil\n"
+			"audio_alert audiounit,nil\n"
+			"module audiounit.so\n"
+#else
 		static const char cfg[] =
 			"audio_player opensles,nil\n"
 			"audio_source opensles,nil\n"
 			"audio_alert opensles,nil\n"
 			"module opensles.so\n"
+#endif
 			"module g711.so\n"
 			"module auconv.so\n"
 			"module auresamp.so\n"
@@ -171,7 +219,11 @@ static int engine_init(void)
 			LOGE("conf_configure_buf failed: %d", err);
 			return err;
 		}
+#if defined(__APPLE__)
+		LOGI("config: audiounit audio, g711 codec");
+#else
 		LOGI("config: opensles audio, g711 codec");
+#endif
 	}
 
 	g_baresip_log.h = baresip_log_handler;
