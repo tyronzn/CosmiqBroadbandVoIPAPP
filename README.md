@@ -142,9 +142,13 @@ readable while nothing is lost:
   the outbound audio direction is still unproven.
 - All three ABIs (`arm64-v8a`, `armeabi-v7a`, `x86_64`) now carry the native
   engine and are verified present in the APK.
-- **iOS** is not built yet. The C engine is portable; it needs a Swift bridge,
+- **iOS builds, but has no SIP engine yet.** The Flutter/CocoaPods/Swift layer
+  compiles green on Codemagic (arm64 `Runner.app`, 20 frameworks, no WebRTC).
+  Still missing: an iOS cross-compile of the C core, a Swift bridge,
   `audiounit` instead of `opensles`, and no mbedTLS (Apple provides the crypto).
-  CI to build it is in place - see Continuous integration above.
+- **iOS push will fail at runtime** until `ios/Runner/GoogleService-Info.plist`
+  is added. `FirebaseMessaging` links fine without it, so this does not show up
+  as a build error - only as a crash in `FirebaseApp.configure()` on device.
 - Incoming calls, hold, transfer and DTMF are wired but unverified on the new engine.
 - Voicemail **playback** is not implemented (listing/delete are wired to the API).
 - Some account features depend on correct per-account provisioning on PortaBilling.
