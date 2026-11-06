@@ -145,8 +145,11 @@ readable while nothing is lost:
 - **iOS is built and bridged, but unproven on a device.** The same C engine as
   Android, cross-compiled for `iphoneos arm64` and shipped as a local
   CocoaPod, with a Swift bridge that mirrors the Android one event for event
-  and additionally owns `AVAudioSession`. It compiles and links; no call has
-  been placed from an iPhone yet.
+  and additionally owns `AVAudioSession`. CI verifies the engine is actually
+  in the binary - our wrapper, baresip's core, its audio path and the
+  audiounit driver are each checked for by string literal, which survives
+  Release stripping. What is **not** proven: no call has been placed from an
+  iPhone, because that needs the Apple Developer Program and TestFlight.
 - **iOS ships one architecture.** The engine archives are built per-SDK, so a
   Simulator run needs a second pass of `tools/build_native_ios.sh`.
 - **iOS push will fail at runtime** until `ios/Runner/GoogleService-Info.plist`
