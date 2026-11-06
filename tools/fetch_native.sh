@@ -42,3 +42,8 @@ echo "Android additionally needs mbedTLS; see native/README.md."
 # libre's generic HMAC backend only does SHA-1, which breaks SIP registration
 # on an mbedTLS build. See the docstring for the full story.
 "$PY" "$HERE/patch_libre_hmac.py" "$HERE/../native/re/src/hmac/hmac.c"
+
+# libre's Apple branch compiles no TLS source at all, while baresip calls
+# tls_add_certf() unguarded. See the docstring; without this an iOS link ends
+# in "Undefined symbol: _tls_add_certf". No-op for Android.
+"$PY" "$HERE/patch_libre_apple_tls.py" "$HERE/../native/re/CMakeLists.txt"

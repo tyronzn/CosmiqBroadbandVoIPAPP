@@ -153,12 +153,25 @@ at all**. The generic HMAC patch in `tools/patch_libre_hmac.py` is irrelevant
 here too, since that patches the file this branch does not compile.
 
 That same branch omits any TLS source - the generic branch gets
-`src/tls/stub.c`, the Apple branch gets nothing - which looks like a link
-failure waiting to happen, because `src/sip/transp.c` and baresip's
-`src/uag.c` both call `tls_*`. It is not. `USE_TLS` is defined **only** under
-`USE_OPENSSL` (`cmake/re-config.cmake`), so every one of those calls is inside
-an `#ifdef USE_TLS` that is false, and they all compile out. No stub required.
-PortaSIP has 5061 closed regardless.
+`src/tls/stub.c`, the Apple branch gets nothing. That is *almost* harmless.
+`USE_TLS` is defined **only** under `USE_OPENSSL` (`cmake/re-config.cmake`),
+so nearly every `tls_*` call in libre and baresip sits inside an
+`#ifdef USE_TLS` that is false and compiles out.
+
+Almost. **baresip's `src/ua.c:1280` calls `tls_add_certf()` with no guard at
+all**, unlike the sibling call in `src/uag.c:291` which is guarded. So an iOS
+build compiles cleanly and then dies at the link with:
+
+```
+Undefined symbol: _tls_add_certf
+```
+
+`tools/patch_libre_apple_tls.py` adds `src/tls/stub.c` to the Apple branch,
+which defines that function and forty-odd others like it, each returning an
+error. It costs nothing - they are stubs, and TLS is unavailable on this
+build either way, which suits a deployment whose SIP host has 5061 closed.
+The patch is idempotent and a no-op for Android, which takes the generic
+branch and so already has the stub.
 
 ### What ships, and where
 
