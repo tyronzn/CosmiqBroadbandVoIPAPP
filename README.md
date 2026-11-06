@@ -93,6 +93,28 @@ Without bcg729 the app still builds (G.729 is disabled and not offered; µ-law /
 A-law continue to work). See [THIRD_PARTY.md](THIRD_PARTY.md) for the licensing
 implications of shipping G.729.
 
+## Continuous integration (iOS)
+
+iOS cannot be built on Windows - Xcode, the iOS SDK and codesigning are
+macOS-only - so iOS builds run on [Codemagic](https://codemagic.io) via
+[`codemagic.yaml`](codemagic.yaml). The loop is: write on Windows, build on a
+cloud Mac, install on a real iPhone through TestFlight.
+
+It is staged, for the same reason the Android engine was brought up on the
+emulator before any handset: prove it compiles before paying for signing.
+
+| Workflow | Needs an Apple account? | What it answers |
+|---|---|---|
+| `ios-compile-check` | No | Do the pods resolve, does the Swift compile, does it link against the iOS SDK? Produces an unsigned `Runner.app`. |
+| `ios-testflight` | Yes ($99/yr + App Store Connect API key) | Signed build uploaded to TestFlight. Commented out until the membership exists. |
+
+Neither workflow self-triggers. The free tier is 500 minutes a month and an
+iOS build is not cheap, so builds are started by hand from the Codemagic UI.
+
+**PushKit VoIP pushes cannot be tested on the Simulator** - they require a
+real device. TestFlight on an actual iPhone is mandatory either way, which is
+what makes the no-Mac route viable rather than merely tolerable.
+
 ## Repository layout
 
 Two branches, deliberately:
@@ -114,12 +136,15 @@ readable while nothing is lost:
 ## Status / known limitations
 
 - Two-way call **audio** is not yet confirmed on physical hardware. Registration,
-  call setup and RTP negotiation are verified against the live platform, but an
-  emulator microphone proves nothing about audio quality.
-- Only **x86_64** carries the native engine so far; `arm64-v8a` and `armeabi-v7a`
-  are needed for release.
+  call setup, codec negotiation and **inbound RTP** are all verified against the
+  live platform on a real 36-second call, but the emulator feeds the microphone
+  silence by default (see gotcha 10 in [native/README.md](native/README.md)), so
+  the outbound audio direction is still unproven.
+- All three ABIs (`arm64-v8a`, `armeabi-v7a`, `x86_64`) now carry the native
+  engine and are verified present in the APK.
 - **iOS** is not built yet. The C engine is portable; it needs a Swift bridge,
   `audiounit` instead of `opensles`, and no mbedTLS (Apple provides the crypto).
+  CI to build it is in place - see Continuous integration above.
 - Incoming calls, hold, transfer and DTMF are wired but unverified on the new engine.
 - Voicemail **playback** is not implemented (listing/delete are wired to the API).
 - Some account features depend on correct per-account provisioning on PortaBilling.

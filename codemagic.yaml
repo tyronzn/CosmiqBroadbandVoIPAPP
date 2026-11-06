@@ -1,0 +1,135 @@
+# Codemagic CI for Cosmiq Broadband VoIP
+#
+# Built in two stages on purpose, the same way the Android engine was brought
+# up: prove the thing compiles before spending effort (or money) on signing.
+#
+#   Stage 1 - ios-compile-check   no Apple Developer account needed.
+#             Produces an UNSIGNED Runner.app. Answers the only question that
+#             matters right now: do the pods resolve, does the Swift compile,
+#             do the plugins link against the iOS SDK?
+#
+#   Stage 2 - ios-testflight      needs the $99/yr Apple Developer Program
+#             plus an App Store Connect API key. Kept commented out at the
+#             bottom so this file stays valid until that exists.
+#
+# Neither workflow has a `triggering:` block, so nothing builds automatically.
+# Start builds by hand from the Codemagic UI. The free tier is 500 minutes a
+# month and an iOS build is not cheap - automatic builds on every push would
+# drain it in a couple of days.
+
+workflows:
+
+  ios-compile-check:
+    name: iOS compile check (unsigned)
+    instance_type: mac_mini_m2
+    # Hard cap. If a build is still going at 45 min something is wrong and
+    # there is no sense burning the remaining free minutes finding out.
+    max_build_duration: 45
+
+    environment:
+      flutter: 3.41.9          # matches the local toolchain exactly; if
+                               # Codemagic does not offer this build, use
+                               # `stable` and expect minor version drift
+      xcode: latest
+      cocoapods: default
+
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+        - $CM_BUILD_DIR/ios/Pods
+
+    scripts:
+      - name: Toolchain versions
+        script: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+
+      - name: Flutter pub get
+        script: flutter pub get
+
+      - name: Analyze
+        # --no-fatal-infos because the tree currently has 19 style infos and
+        # zero errors. Without the flag `flutter analyze` exits 1 on infos and
+        # fails the build for nothing. Real errors and warnings still fail.
+        script: flutter analyze --no-fatal-infos
+
+      - name: Unit tests
+        script: flutter test
+
+      - name: Build unsigned iOS
+        # Generates ios/Podfile on first run and drives pod install itself.
+        script: flutter build ios --release --no-codesign
+
+      - name: Report what landed in the app bundle
+        # The iOS equivalent of the per-ABI check that caught the missing
+        # arm64 engine on Android - a silently absent binary is the failure
+        # mode worth guarding against.
+        script: |
+          APP=build/ios/iphoneos/Runner.app
+          echo "--- bundle ---"
+          ls -la "$APP" || true
+          echo "--- frameworks ---"
+          ls -la "$APP/Frameworks" 2>/dev/null || echo "(none)"
+          echo "--- main binary arch ---"
+          lipo -info "$APP/Runner" 2>/dev/null || true
+
+    artifacts:
+      - build/ios/iphoneos/Runner.app
+      - build/ios/iphoneos/*.app
+      - /tmp/xcodebuild_logs/*.log
+
+    # publishing:
+    #   email:
+    #     recipients:
+    #       - your-address@example.com   # deliberately not hardcoded: this
+    #     notify:                        # repo is public
+    #       success: false
+    #       failure: true
+
+
+# ---------------------------------------------------------------------------
+# Stage 2. Uncomment once the Apple Developer Program membership is active and
+# an App Store Connect API key has been added to Codemagic.
+#
+# Set up in Codemagic first:
+#   Teams > Integrations > Apple Developer Portal > connect the API key
+#   (Issuer ID, Key ID, and the .p8 private key from App Store Connect)
+# Then create the bundle id za.co.cosmiq.voip in App Store Connect, and an app
+# record, before the first upload - TestFlight will not create them for you.
+#
+#  ios-testflight:
+#    name: iOS signed build -> TestFlight
+#    instance_type: mac_mini_m2
+#    max_build_duration: 60
+#    integrations:
+#      app_store_connect: CosmiqAppStoreKey   # name given to the key in Codemagic
+#    environment:
+#      flutter: 3.41.9
+#      xcode: latest
+#      cocoapods: default
+#      ios_signing:
+#        distribution_type: app_store
+#        bundle_identifier: za.co.cosmiq.voip
+#    cache:
+#      cache_paths:
+#        - $HOME/.pub-cache
+#        - $HOME/Library/Caches/CocoaPods
+#    scripts:
+#      - name: Flutter pub get
+#        script: flutter pub get
+#      - name: Set up signing
+#        script: xcode-project use-profiles
+#      - name: Build signed ipa
+#        script: |
+#          flutter build ipa --release \
+#            --export-options-plist=/Users/builder/export_options.plist
+#    artifacts:
+#      - build/ios/ipa/*.ipa
+#    publishing:
+#      app_store_connect:
+#        auth: integration
+#        submit_to_testflight: true
+#        # Leave submit_to_app_store false until you actually intend to ship.
+#        submit_to_app_store: false
