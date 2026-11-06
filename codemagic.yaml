@@ -100,17 +100,35 @@ workflows:
           lipo -info "$APP/Runner" 2>/dev/null || true
 
           echo "--- SIP engine present? ---"
-          ENGINE="$APP/Frameworks/CosmiqSip.framework/CosmiqSip"
-          if [ ! -f "$ENGINE" ]; then
-            echo "FAIL: CosmiqSip.framework is not in the bundle."
-            echo "The app would install and run with no SIP at all."
+          # CosmiqSip is a static_framework, so there is deliberately no
+          # CosmiqSip.framework here: its code is linked straight into the
+          # Runner binary. Handle both, in case that ever changes.
+          FW="$APP/Frameworks/CosmiqSip.framework/CosmiqSip"
+          if [ -f "$FW" ]; then
+            TARGET="$FW"; echo "engine ships as a framework"
+          else
+            TARGET="$APP/Runner"; echo "engine is statically linked into Runner"
+          fi
+
+          # Matched on string literals rather than symbols: Release strips the
+          # symbol table, so nm proves nothing here, while __cstring survives.
+          fail=0
+          check() {
+            n=$(strings -a "$TARGET" 2>/dev/null | grep -cF "$1" || true)
+            printf '  %-26s %s\n' "$2" "$n"
+            [ "$n" -gt 0 ] || fail=1
+          }
+          check "CosmiqSipNative"      "our wrapper"
+          check "ua: ua_register"      "baresip core"
+          check "audio tx pipeline:"   "baresip audio path"
+          check "audiounit"            "audiounit driver"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "FAIL: the engine is not fully linked into the app."
+            echo "It would install and run with no SIP, silently."
             exit 1
           fi
-          lipo -info "$ENGINE"
-          echo "--- engine symbols (should be non-zero) ---"
-          n=$(nm -gU "$ENGINE" 2>/dev/null | grep -c "_cosmiq_sip_" || true)
-          echo "cosmiq_sip_* exported: $n"
-          [ "$n" -gt 0 ] || { echo "FAIL: engine linked but exports nothing"; exit 1; }
+          echo "engine verified in the binary"
 
     artifacts:
       - build/ios/iphoneos/Runner.app
