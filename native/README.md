@@ -40,7 +40,8 @@ mbedTLS, and **hard-errors with none** (`missing HMAC-SHA256 backend` in
 `src/hmac/hmac_sha1.c`). That gives a different answer per platform:
 
 - **iOS: nothing to add.** libre uses Apple's native crypto, so it builds with
-  `-DUSE_OPENSSL=OFF` and no third-party dependency at all.
+  `-DUSE_OPENSSL=OFF` and no third-party dependency at all. Confirmed in
+  practice - see [iOS build](#ios-build).
 - **Android: mbedTLS.** Apache-2.0, CMake-native and quick to cross-compile -
   far less work than OpenSSL, which needs perl and its own configure dance.
   libre ships `cmake/FindMBEDTLS.cmake`, so it is a supported path.
@@ -134,6 +135,78 @@ emulator against PortaSIP with plain RTP/AVP - is done. See
 [Remaining work](#remaining-work-1) at the end for what is left.
 
 
+## iOS build
+
+`tools/build_native_ios.sh [iphoneos|iphonesimulator] [arch] [min-version]`.
+Must run on macOS - it needs Xcode's clang and the iOS SDK - so in practice it
+runs on Codemagic, which is what `codemagic.yaml` calls. Defaults to
+`iphoneos arm64 13.0`.
+
+It is the simpler of the two platforms, for a reason worth spelling out
+because it is not obvious from the CMake:
+
+libre picks its crypto backend in the order **OpenSSL -> Apple -> generic**
+(`CMakeLists.txt`, the `if(USE_OPENSSL) / elseif(APPLE) / else()` block). With
+`-DUSE_OPENSSL=OFF` an Apple target therefore compiles `src/aes/apple/aes.c`
+and `src/hmac/apple/hmac.c` against CommonCrypto, and **mbedTLS is not needed
+at all**. The generic HMAC patch in `tools/patch_libre_hmac.py` is irrelevant
+here too, since that patches the file this branch does not compile.
+
+That same branch omits any TLS source - the generic branch gets
+`src/tls/stub.c`, the Apple branch gets nothing - which looks like a link
+failure waiting to happen, because `src/sip/transp.c` and baresip's
+`src/uag.c` both call `tls_*`. It is not. `USE_TLS` is defined **only** under
+`USE_OPENSSL` (`cmake/re-config.cmake`), so every one of those calls is inside
+an `#ifdef USE_TLS` that is false, and they all compile out. No stub required.
+PortaSIP has 5061 closed regardless.
+
+### What ships, and where
+
+The script stages a local CocoaPod at `ios/CosmiqSip/`:
+
+| Path | Committed? | What |
+|---|---|---|
+| `CosmiqSip.podspec` | yes | links it all together |
+| `Classes/CosmiqSipPlugin.swift` | yes | the bridge |
+| `lib/libre.a`, `lib/libbaresip.a` | no | prebuilt archives |
+| `src/cosmiq_sip.c` | no | staged copy, compiled **by the pod** so Xcode picks the arch |
+| `include/cosmiq_sip.h` | no | the pod's one public header |
+| `vendor-include/` | no | re + baresip headers the wrapper includes |
+
+A pod rather than adding files to `Runner.xcodeproj`: that project file is
+generated and merge-hostile, and cannot be edited safely from the Windows box
+this app is developed on. CocoaPods compiles its own sources without anyone
+touching it. Nothing in the podspec reaches outside the pod directory, because
+CocoaPods rejects file patterns that climb above the podspec - hence the
+staging rather than referencing `../../native`.
+
+### The Swift bridge owns the audio session
+
+This is the one real asymmetry with Android. baresip's `audiounit` module is
+pure AudioUnit C and **never touches `AVAudioSession`** - grep it and there is
+not one mention. Without the app configuring the session there is no
+microphone, no routing and no audio in the background.
+
+`CosmiqSipPlugin.swift` therefore sets `.playAndRecord` / `.voiceChat` around
+each call, and handles two things that bite real users rather than test calls:
+
+- **Interruptions.** A cellular call, Siri or an alarm takes the session away
+  and iOS does not give it back. The session is re-activated when the
+  interruption ends and a call is still up. `.shouldResume` is deliberately
+  ignored: that flag is advice for media playback, and honouring it would
+  leave some interruptions ending in permanent silence.
+- **Route changes.** Unplugging a headset mid-call otherwise leaves audio
+  pointed at a route that no longer exists.
+
+`.voiceChat` is not cosmetic - it pairs with the
+`kAudioUnitSubType_VoiceProcessingIO` unit the module already uses, and is
+what turns echo cancellation, AGC and noise suppression on rather than merely
+permitting them.
+
+`toggleSpeaker` is genuinely implemented here, via
+`overrideOutputAudioPort`. The Android bridge only acknowledges it and lets
+the platform route.
+
 ## Status: working on Android
 
 Registers to PortaSIP and places a real connected call, verified on the
@@ -195,5 +268,10 @@ Each was misleading in its own way, so they are worth recording.
 1. Verify two-way **audio quality** on a real handset; the emulator microphone
    is silent, so only signalling and RTP setup are proven here.
 2. Incoming calls, hold, transfer and DTMF through the new engine.
-3. iOS: same C core with a Swift bridge, `audiounit` instead of `opensles`, and
-   **no mbedTLS at all** since libre uses Apple's native crypto there.
+3. iOS: built and bridged (see above), but **unproven on a device**. It
+   compiles and links; no call has been placed from an iPhone yet.
+4. The iOS archives are one architecture at a time. A Simulator run needs
+   `build_native_ios.sh iphonesimulator`, and shipping both from one build
+   would want an `.xcframework`.
+5. `fetch_native.sh` clones `re` and `baresip` at HEAD. Reproducible builds
+   want those pinned to a known-good commit.
